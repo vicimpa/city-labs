@@ -1,0 +1,39 @@
+{
+ "km": {
+  "avenue": 18.8,
+  "boulevard": 8.1,
+  "fw12": 26.5,
+  "fw13": 21.6,
+  "industrial": 1.9,
+  "lane": 9.7,
+  "mountain": 27.1,
+  "raceway": 1.9,
+  "ramp1": 17.0,
+  "ramp2": 5.6,
+  "runway": 1.0,
+  "rural": 38.9,
+  "street": 28.5
+ },
+ "total_km": 206.5,
+ "urban_km": 67.0,
+ "rural_km": 66.0,
+ "junctions_3": 100,
+ "junctions_4": 77,
+ "junctions_5plus": 3,
+ "dead_ends": 6,
+ "approaches": {
+  "downtown": 8,
+  "midtown": 8,
+  "oldtown": 8,
+  "northgate": 8,
+  "eastside": 8,
+  "beach": 3,
+  "port": 7,
+  "industrial": 8,
+  "westwood": 4,
+  "island": 4,
+  "lighthouse": 8,
+  "riverbend": 2,
+  "villas": 2
+ }
+}

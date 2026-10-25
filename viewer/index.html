@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vespera Viewer</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #0b0f14; color: #d8dde3; font: 13px system-ui, sans-serif; overflow: hidden; }
+  #ui { position: fixed; top: 10px; left: 10px; background: rgba(12,16,22,.85); padding: 10px 12px; border-radius: 8px; }
+  #ui label { display: block; margin: 3px 0; cursor: pointer; }
+  #info { position: fixed; bottom: 10px; left: 10px; background: rgba(12,16,22,.85); padding: 6px 10px; border-radius: 6px; }
+  #status { color: #f0b34a; }
+</style>
+</head>
+<body>
+<div id="ui"><b>Vespera Bay</b><div id="layers"></div><div id="status">loading…</div></div>
+<div id="info">ЛКМ — вращать · ПКМ — сдвиг · колесо — зум · двойной клик — фокус</div>
+<script type="module" src="./main.js"></script>
+</body>
+</html>

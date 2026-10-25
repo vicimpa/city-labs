@@ -1,0 +1,26 @@
+{
+  "name": "race-game",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "view": "vite --config viewer/vite.config.js",
+    "unpack": "node tools/vspb2json.mjs",
+    "test:vspb": "node test/vspb.compat.mjs && node test/vspb.roundtrip.mjs",
+    "edit": "vite --config viewer/vite.config.js --open /editor/",
+    "test:roads": "node test/roadbuild.compare.mjs",
+    "migrate": "node tools/migrate_src.mjs"
+  },
+  "dependencies": {
+    "@dimforge/rapier3d-compat": "^0.21.0",
+    "three": "^0.186.1"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.64.1",
+    "@types/node": "^26.6.5",
+    "@types/three": "^0.186.0",
+    "typescript": "5.9",
+    "vite": "^8.3.5",
+    "vitest": "^5.0.5"
+  }
+}

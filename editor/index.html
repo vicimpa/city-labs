@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vespera Editor</title>
+<style>
+  :root { --bg: #0b0f14; --panel: rgba(14,19,26,.94); --line: #263241; --fg: #d8dde3; --muted: #7f8c9b; --acc: #3fb6ff; --warn: #f0b34a; --bad: #ff5a5a; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); font: 12px system-ui, sans-serif; overflow: hidden; }
+  canvas { display: block; }
+  button { background: #1b2430; color: var(--fg); border: 1px solid var(--line); border-radius: 5px; padding: 4px 9px; font: inherit; cursor: pointer; }
+  button:hover { border-color: #3a4a5e; background: #222d3b; }
+  button:disabled { opacity: .45; cursor: default; }
+  button.on { background: #12405c; border-color: var(--acc); }
+  button.danger:hover { border-color: var(--bad); color: #ffb3b3; }
+  button.link { background: none; border: none; color: var(--acc); padding: 0; text-decoration: underline; }
+  button.mini { padding: 0 5px; font-size: 11px; line-height: 16px; margin-left: 4px; }
+  button.ghost { border-color: transparent; background: none; color: var(--muted); visibility: hidden; }
+  .field:hover button.ghost { visibility: visible; }
+  input, select, textarea { background: #0f151c; color: var(--fg); border: 1px solid var(--line); border-radius: 4px; padding: 3px 5px; font: inherit; min-width: 0; }
+  textarea { width: 100%; font: 11px ui-monospace, monospace; resize: vertical; }
+  textarea.bad, input.bad { border-color: var(--bad); }
+  input[type=color] { padding: 0; width: 28px; height: 22px; }
+  input[type=checkbox] { width: auto; }
+  #top { position: fixed; top: 0; left: 0; right: 0; height: 38px; display: flex; gap: 6px; align-items: center; padding: 0 10px; background: var(--panel); border-bottom: 1px solid var(--line); z-index: 3; }
+  #top b { margin-right: 8px; }
+  #top .sep { width: 1px; height: 20px; background: var(--line); margin: 0 4px; }
+  #save { margin-left: auto; color: var(--muted); white-space: nowrap; }
+  #save.dirty { color: var(--warn); }
+  #tools { position: fixed; top: 48px; left: 10px; width: 204px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 8px; z-index: 2; }
+  #tools .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
+  #tools .grid button { text-align: left; padding: 5px 6px; }
+  #tools .grid button kbd { float: right; color: var(--muted); font: 10px ui-monospace, monospace; }
+  #toolopts { margin-top: 8px; display: grid; gap: 5px; }
+  #toolopts label { display: grid; grid-template-columns: 62px 1fr; align-items: center; gap: 4px; color: var(--muted); }
+  #side { position: fixed; top: 48px; right: 10px; bottom: 40px; width: 340px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; display: flex; flex-direction: column; z-index: 2; }
+  #tabs { display: flex; border-bottom: 1px solid var(--line); }
+  #tabs button { flex: 1; border: none; border-radius: 0; background: none; padding: 8px 0; color: var(--muted); }
+  #tabs button.on { color: var(--fg); box-shadow: inset 0 -2px var(--acc); }
+  .pane { flex: 1; overflow: auto; padding: 10px; display: none; }
+  .pane.on { display: block; }
+  .muted { color: var(--muted); }
+  .warn { color: var(--warn); background: rgba(240,179,74,.08); border: 1px solid rgba(240,179,74,.3); border-radius: 5px; padding: 6px 8px; margin: 6px 0; }
+  .hdr { font-size: 13px; font-weight: 600; margin-bottom: 2px; }
+  .actions { display: flex; flex-wrap: wrap; gap: 4px; margin: 8px 0 10px; }
+  .fields { display: grid; gap: 4px; }
+  .field { display: grid; grid-template-columns: 82px 1fr; gap: 6px; align-items: start; }
+  .field > label { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-top: 4px; }
+  .field.nested { grid-template-columns: 1fr; }
+  .field.add { grid-template-columns: 82px 1fr; margin-top: 4px; opacity: .8; }
+  .row { display: flex; gap: 4px; align-items: center; }
+  .row.grow > input:first-child { flex: 1; }
+  .row.vec input { width: 100%; }
+  input.short { width: 100%; }
+  .field input[type=text], .field input[type=number] { width: 100%; }
+  .sublist { display: grid; gap: 6px; }
+  .subrec { border: 1px solid var(--line); border-radius: 6px; padding: 6px; }
+  .subhead { color: var(--muted); margin-bottom: 4px; display: flex; align-items: center; }
+  .subhead button:first-of-type { margin-left: auto; }
+  .list { display: grid; gap: 2px; margin-top: 6px; }
+  #pane-defs .list { max-height: 34vh; overflow: auto; border: 1px solid var(--line); border-radius: 6px; padding: 3px; }
+  .list div { padding: 3px 6px; border-radius: 4px; cursor: pointer; display: flex; gap: 6px; align-items: center; }
+  .list div:hover { background: #1b2430; }
+  .list div.on { background: #12405c; }
+  .sw { width: 12px; height: 12px; border-radius: 3px; flex: none; border: 1px solid #0006; }
+  .layers label { display: flex; gap: 6px; align-items: center; padding: 2px 0; }
+  #hint { position: fixed; left: 10px; right: 360px; bottom: 8px; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 5px 10px; color: var(--muted); z-index: 2; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #hint b { color: var(--fg); font-weight: 500; }
+  #coords { position: fixed; right: 360px; bottom: 40px; font: 11px ui-monospace, monospace; color: var(--muted); z-index: 2; }
+  #busy { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; background: rgba(5,8,12,.6); z-index: 10; font-size: 14px; }
+  #busy[hidden] { display: none; }
+</style>
+</head>
+<body>
+<div id="top">
+  <b>Vespera Editor</b>
+  <button id="open" title="Открыть .vspb с диска">Открыть…</button>
+  <button id="download" title="Скачать текущий мир как .vspb">Скачать .vspb</button>
+  <button id="writeProject" title="Записать в city/data/vespera.vspb (только dev-сервер)" hidden>Записать в проект</button>
+  <button id="reset" class="danger" title="Выбросить правки из браузера и загрузить файл проекта">Сбросить</button>
+  <span class="sep"></span>
+  <button id="undo" title="Отменить (Ctrl+Z)">↶</button>
+  <button id="redo" title="Повторить (Ctrl+Shift+Z)">↷</button>
+  <span class="sep"></span>
+  <span id="source" class="muted"></span>
+  <span id="save">—</span>
+  <input id="file" type="file" accept=".vspb" hidden>
+</div>
+<div id="tools">
+  <div class="grid">
+    <button data-tool="select">Выбор <kbd>1</kbd></button>
+    <button data-tool="road">Дорога <kbd>2</kbd></button>
+    <button data-tool="building">Здание <kbd>3</kbd></button>
+    <button data-tool="surface">Площадка <kbd>4</kbd></button>
+    <button data-tool="furniture">Объект <kbd>5</kbd></button>
+    <button data-tool="tree">Дерево <kbd>6</kbd></button>
+    <button data-tool="wind">Ветряк <kbd>7</kbd></button>
+    <button data-tool="rail">Ж/д путь <kbd>8</kbd></button>
+    <button data-tool="terrain">Рельеф <kbd>9</kbd></button>
+  </div>
+  <div id="toolopts"></div>
+</div>
+<div id="side">
+  <div id="tabs">
+    <button data-tab="props" class="on">Свойства</button>
+    <button data-tab="defs">Типы</button>
+    <button data-tab="find">Поиск</button>
+    <button data-tab="layers">Слои</button>
+  </div>
+  <div id="pane-props" class="pane on"></div>
+  <div id="pane-defs" class="pane"></div>
+  <div id="pane-find" class="pane"></div>
+  <div id="pane-layers" class="pane"></div>
+</div>
+<div id="coords"></div>
+<div id="hint"></div>
+<div id="busy">загрузка…</div>
+<script type="module" src="./main.js"></script>
+</body>
+</html>
