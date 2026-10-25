@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'">
+<title>City Labs</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #0b0f14; color: #d8dde3; font: 13px system-ui, sans-serif; -webkit-app-region: drag; user-select: none; overflow: hidden; }
+  main { height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; padding: 0 28px; box-sizing: border-box; text-align: center; }
+  .logo { width: 96px; height: 96px; border-radius: 22px; background: linear-gradient(140deg, #3fb6ff, #1f4d7a 60%, #0f2236); position: relative; box-shadow: 0 8px 28px #0008; }
+  .logo::before, .logo::after { content: ''; position: absolute; bottom: 18px; background: #e8f4ff; border-radius: 2px; }
+  .logo::before { left: 20px; width: 16px; height: 46px; box-shadow: 22px -14px 0 #cfe6ff, 44px 8px 0 #b6d6f5; }
+  .logo::after { left: 14px; right: 14px; height: 3px; bottom: 14px; opacity: .7; }
+  h1 { margin: 6px 0 0; font-size: 20px; font-weight: 600; letter-spacing: .3px; }
+  #ver { color: #7f8c9b; font-size: 12px; margin-top: -8px; }
+  #text { min-height: 34px; color: #b9c4cf; line-height: 1.35; }
+  .bar { width: 220px; height: 4px; background: #1b2430; border-radius: 2px; overflow: hidden; }
+  .bar i { display: block; height: 100%; width: 30%; background: #3fb6ff; border-radius: 2px; animation: slide 1.1s ease-in-out infinite; }
+  .bar.det i { animation: none; transition: width .2s; }
+  @keyframes slide { 0% { margin-left: -30%; } 100% { margin-left: 100%; } }
+  .buttons { display: none; gap: 8px; -webkit-app-region: no-drag; }
+  .buttons.on { display: flex; }
+  button { background: #1b2430; color: #d8dde3; border: 1px solid #263241; border-radius: 6px; padding: 6px 14px; font: inherit; cursor: pointer; }
+  button.primary { background: #12405c; border-color: #3fb6ff; }
+</style>
+</head>
+<body>
+<main>
+  <div class="logo"></div>
+  <h1>City Labs</h1>
+  <div id="ver"></div>
+  <div id="text">Запуск…</div>
+  <div class="bar" id="bar"><i id="fill"></i></div>
+  <div class="buttons" id="buttons">
+    <button class="primary" onclick="window.splash.choose('download')">Скачать</button>
+    <button onclick="window.splash.choose('later')">Позже</button>
+  </div>
+</main>
+<script>
+  window.show = (st) => {
+    if (st.version) document.getElementById('ver').textContent = 'версия ' + st.version;
+    if (st.text) document.getElementById('text').textContent = st.text;
+    const bar = document.getElementById('bar'), fill = document.getElementById('fill');
+    bar.style.visibility = st.offer ? 'hidden' : 'visible';
+    bar.classList.toggle('det', typeof st.progress === 'number');
+    fill.style.width = typeof st.progress === 'number' ? Math.round(st.progress * 100) + '%' : '30%';
+    document.getElementById('buttons').classList.toggle('on', !!st.offer);
+  };
+</script>
+</body>
+</html>

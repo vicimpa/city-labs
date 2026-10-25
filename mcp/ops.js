@@ -1,0 +1,274 @@
+// MCP tools over a Vespera world, written against an abstract session so the same code runs in
+// the editor (edits go through its undo history and show live) and headless on a file (Node).
+// Session interface:
+//   doc, kinds, natural(x,y), graded(x,y), info()
+//   edit(kind, rec, fn, label)   insert(kind, rec, label)   remove(kind, rec, label)
+//   roadTx(tx, label)            terrain(box, fn(base), label)   setDef(group, name, value|null)
+//   save() -> { file }
+//   app only: view(args), select(kind, rec), undo(), redo()
+// Tool schemas are functions of zod so this module itself needs no dependency.
+import { addRoad, reprofile, deleteEdge, deleteNode } from '../editor/roadedit.js';
+
+const KIND_DOC = `Record kinds and their shape:
+- building: {type, zone, parts:[{p:[[x,y],...] outline, holes?, z base height, h height, m material}]} (no id, addressed by index)
+- surface: ground patch {p:[[x,y],...], holes?, m surface material}
+- furniture: {t prefab, p:[x,y,z], h heading rad, owner?} — owner 'e<id>'/'n<id>' marks items the road rules place (regenerated when that road changes)
+- tree: [x,y,z]; wind: wind turbine [x,y,z,0]; rail: polyline [[x,y,z],...]; train: {pts, closed}
+- edge: road {id, name, cls, n:[node,node], pts:[[x,y,z],...] 4 m apart, elev[], tunnel[], trim (derived)}
+- node: road junction {id, p:[x,y,z], kind (derived), grad}
+Coordinates are metres, Z up, the map spans about ±4600 m. Asphalt, markings, junction pads, pier bents, the
+graded terrain and owned furniture are derived and rebuilt automatically after every change.`;
+
+const KINDS_ENUM = ['building', 'surface', 'furniture', 'tree', 'wind', 'rail', 'train', 'edge', 'node'];
+
+// ---------------------------------------------------------------- helpers
+function list(s, kind) {
+  const K = s.kinds[kind];
+  if (!K) throw new Error(`unknown kind '${kind}', expected one of ${KINDS_ENUM.join(', ')}`);
+  return K.list(s.doc.layers) ?? [];
+}
+function resolve(s, ref) {
+  const arr = list(s, ref.kind);
+  let rec;
+  if (ref.id !== undefined) rec = arr.find((r) => r.id === ref.id);
+  else if (ref.index !== undefined) rec = arr[ref.index];
+  if (!rec) throw new Error(`${ref.kind} ${ref.id !== undefined ? 'id ' + ref.id : 'index ' + ref.index} not found`);
+  return rec;
+}
+const round = (v) => (typeof v === 'number' ? Math.round(v * 100) / 100 : v);
+function summary(s, kind, rec, index) {
+  const K = s.kinds[kind], c = K.center(rec);
+  const out = { kind, index, title: K.title(rec), center: c.map(round) };
+  if (rec.id !== undefined) out.id = rec.id;
+  return out;
+}
+const matches = (v, cond) => {
+  if (cond && typeof cond === 'object' && !Array.isArray(cond)) {
+    if ('contains' in cond) return String(v ?? '').toLowerCase().includes(String(cond.contains).toLowerCase());
+    if ('in' in cond) return cond.in.includes(v);
+    if ('min' in cond || 'max' in cond) return typeof v === 'number' && v >= (cond.min ?? -Infinity) && v <= (cond.max ?? Infinity);
+  }
+  return v === cond;
+};
+
+// ---------------------------------------------------------------- tools
+const ref = (z) => ({
+  kind: z.enum(KINDS_ENUM).describe('record kind'),
+  index: z.number().int().optional().describe('position in its list (buildings, surfaces, furniture, trees…)'),
+  id: z.number().int().optional().describe('id for edge / node'),
+});
+
+export const TOOLS = [
+  {
+    name: 'world_info', title: 'World overview',
+    description: 'Overview of the open world: file, unsaved state, record counts per kind, map extent, registry sizes. Start here.\n\n' + KIND_DOC,
+    schema: () => ({}),
+    run(s) {
+      const L = s.doc.layers, t = L.terrain;
+      return { ...s.info(), counts: Object.fromEntries(KINDS_ENUM.map((k) => [k, list(s, k).length])),
+        terrain: t && { x0: t.x0, y0: t.y0, x1: t.x0 + (t.nx - 1) * t.res, y1: t.y0 + (t.ny - 1) * t.res, res: t.res },
+        registry: Object.fromEntries(Object.entries(L.defs ?? {}).filter(([, v]) => v && typeof v === 'object').map(([k, v]) => [k, Object.keys(v).length])),
+        roadClasses: Object.keys(L.roads?.classes ?? {}) };
+    },
+  },
+  {
+    name: 'list_types', title: 'Type registry',
+    description: 'Entries of the type registry: materials (building part `m`), buildingTypes (`type`), zones, surfaces (surface `m`), furniture prefabs (`t`), roadMaterials, roadClasses, and road classes with their lane/width parameters (group "roads.classes"). Without a group: the names in every group.',
+    schema: (z) => ({ group: z.string().optional().describe('materials | buildingTypes | zones | surfaces | furniture | roadMaterials | roadClasses | roads.classes') }),
+    run(s, { group }) {
+      const L = s.doc.layers;
+      if (group === 'roads.classes') return L.roads?.classes ?? {};
+      if (group) { const g = L.defs?.[group]; if (!g) throw new Error(`no registry group '${group}'`); return g; }
+      const out = Object.fromEntries(Object.entries(L.defs ?? {}).filter(([, v]) => v && typeof v === 'object').map(([k, v]) => [k, Object.keys(v)]));
+      out['roads.classes'] = Object.keys(L.roads?.classes ?? {});
+      return out;
+    },
+  },
+  {
+    name: 'find', title: 'Find records',
+    description: 'Search records of one kind. `where` matches top-level fields: a value for equality, {contains:"txt"}, {in:[...]}, or {min,max}. `near` keeps records whose centre is within r metres of (x,y); `bbox` = [x0,y0,x1,y1]. Returns summaries (kind, index/id, title, centre) — use get for the full record.',
+    schema: (z) => ({
+      kind: z.enum(KINDS_ENUM),
+      where: z.record(z.string(), z.any()).optional(),
+      near: z.object({ x: z.number(), y: z.number(), r: z.number() }).optional(),
+      bbox: z.array(z.number()).length(4).optional(),
+      limit: z.number().int().optional().describe('default 50'), offset: z.number().int().optional(),
+    }),
+    run(s, { kind, where, near, bbox, limit = 50, offset = 0 }) {
+      const K = s.kinds[kind], out = [];
+      list(s, kind).forEach((rec, i) => {
+        if (where && (Array.isArray(rec) || !Object.entries(where).every(([k, c]) => matches(rec[k], c)))) return;
+        if (near || bbox) {
+          const [x, y] = K.center(rec);
+          if (near && Math.hypot(x - near.x, y - near.y) > near.r) return;
+          if (bbox && (x < bbox[0] || y < bbox[1] || x > bbox[2] || y > bbox[3])) return;
+        }
+        out.push(i);
+      });
+      return { total: out.length, items: out.slice(offset, offset + limit).map((i) => summary(s, kind, list(s, kind)[i], i)) };
+    },
+  },
+  {
+    name: 'get', title: 'Get a record',
+    description: 'Full record of one kind by index (or id for edge/node).',
+    schema: (z) => ref(z),
+    run(s, a) { const rec = resolve(s, a); return { ...summary(s, a.kind, rec, list(s, a.kind).indexOf(rec)), record: rec }; },
+  },
+  {
+    name: 'update', title: 'Update a record',
+    description: 'Change fields of a record: `set` merges top-level fields (give whole arrays, e.g. a building\'s `parts`), `unset` removes fields, `value` replaces an array record (tree, wind, rail) entirely. Unknown fields are kept in the file. For roads, change pts / cls / name here; derived geometry follows.',
+    schema: (z) => ({ ...ref(z), set: z.record(z.string(), z.any()).optional(), unset: z.array(z.string()).optional(), value: z.any().optional() }),
+    run(s, a) {
+      const rec = resolve(s, a);
+      s.edit(a.kind, rec, (r) => {
+        if (a.value !== undefined) { if (!Array.isArray(r)) throw new Error('value replaces array records only; use set'); r.length = 0; r.push(...a.value); }
+        if (a.set) { if (Array.isArray(r)) throw new Error('this kind is an array record; use value'); Object.assign(r, structuredClone(a.set)); }
+        for (const k of a.unset ?? []) delete r[k];
+      }, `MCP: изменить ${s.kinds[a.kind].label}`);
+      return summary(s, a.kind, rec, list(s, a.kind).indexOf(rec));
+    },
+  },
+  {
+    name: 'create', title: 'Create a record',
+    description: 'Add a record of a kind (see world_info for shapes). Roads are created with road_add, not here. Heights: use terrain_sample to put things on the ground.',
+    schema: (z) => ({ kind: z.enum(KINDS_ENUM.filter((k) => k !== 'edge' && k !== 'node')), record: z.any() }),
+    run(s, { kind, record }) {
+      if (kind === 'building' && !(record?.parts?.length)) throw new Error('a building needs parts: [{p, z, h, m}]');
+      if ((kind === 'surface') && !(record?.p?.length >= 3)) throw new Error('a surface needs an outline p of 3+ points');
+      const rec = structuredClone(record);
+      s.insert(kind, rec, `MCP: ${s.kinds[kind].label}`);
+      return summary(s, kind, rec, list(s, kind).indexOf(rec));
+    },
+  },
+  {
+    name: 'delete', title: 'Delete a record',
+    description: 'Remove a record. Deleting a node removes the roads attached to it; nodes left without roads go too.',
+    schema: (z) => ref(z),
+    run(s, a) {
+      const rec = resolve(s, a);
+      if (a.kind === 'edge') s.roadTx(deleteEdge(s.doc, rec), 'MCP: удалить дорогу');
+      else if (a.kind === 'node') s.roadTx(deleteNode(s.doc, rec), 'MCP: удалить узел');
+      else s.remove(a.kind, rec, `MCP: удалить ${s.kinds[a.kind].label}`);
+      return { deleted: true };
+    },
+  },
+  {
+    name: 'transform', title: 'Move / rotate a record',
+    description: 'Move a record by (dx, dy, dz) metres and/or rotate it about its centre (buildings, surfaces, furniture). ground:true sets buildings / furniture / trees / turbines onto the graded terrain afterwards. Moving a node bends the roads that end at it; moving a road moves its nodes.',
+    schema: (z) => ({ ...ref(z), dx: z.number().optional(), dy: z.number().optional(), dz: z.number().optional(), rotate_deg: z.number().optional(), ground: z.boolean().optional() }),
+    run(s, a) {
+      const rec = resolve(s, a), K = s.kinds[a.kind];
+      s.edit(a.kind, rec, (r) => {
+        if (a.dx || a.dy || a.dz) K.move(r, a.dx ?? 0, a.dy ?? 0, a.dz ?? 0, s.doc.layers);
+        if (a.rotate_deg) { if (!K.rotate) throw new Error(`${a.kind} cannot rotate`); const [cx, cy] = K.center(r); K.rotate(r, (a.rotate_deg * Math.PI) / 180, cx, cy); }
+        if (a.ground && ['building', 'furniture', 'tree', 'wind'].includes(a.kind)) { const [x, y, z] = K.center(r); K.move(r, 0, 0, Math.max(s.graded(x, y), 0) - z, s.doc.layers); }
+      }, `MCP: переместить ${K.label}`);
+      return summary(s, a.kind, rec, list(s, a.kind).indexOf(rec));
+    },
+  },
+  {
+    name: 'road_add', title: 'Lay a new road',
+    description: 'Lay a road through control points [[x,y],...] (corners rounded with the class radius, resampled every 4 m). Each end attaches to a node within ~15 m, or splits a road it lands on into a T-junction, or gets a new end node. The road gets a vertical profile over the natural ground; asphalt, junction pads, lamps and terrain grading follow. cls: a key of roads.classes (street, avenue, boulevard, lane, rural, mountain, industrial, fw12, fw13, ramp1…).',
+    schema: (z) => ({ points: z.array(z.array(z.number()).min(2)).min(2), cls: z.string(), name: z.string().optional() }),
+    run(s, { points, cls, name }) {
+      if (!s.doc.layers.roads?.classes?.[cls]) throw new Error(`unknown road class '${cls}'`);
+      const res = addRoad(s.doc, s.natural, points, cls, name ?? '');
+      if (!res) throw new Error('could not lay the road (too short, or both ends on one node)');
+      s.roadTx(res.tx, 'MCP: новая дорога');
+      const e = res.edge;
+      return { id: e.id, name: e.name, nodes: e.n, points: e.pts.length, length_m: Math.round((e.pts.length - 1) * 4) };
+    },
+  },
+  {
+    name: 'road_reprofile', title: 'Re-level a road',
+    description: 'Recompute a road\'s heights over the natural ground, pinned to its end nodes; bridges (elev) where it runs >3 m above ground, tunnels where >7.5 m below for 80+ m.',
+    schema: (z) => ({ id: z.number().int() }),
+    run(s, { id }) {
+      const rec = resolve(s, { kind: 'edge', id });
+      s.edit('edge', rec, (r) => reprofile(s.doc, s.natural, r), 'MCP: профиль дороги');
+      return { id, z: [rec.pts[0][2], rec.pts[rec.pts.length - 1][2]], bridges: rec.elev.filter(Boolean).length, tunnel: rec.tunnel.filter(Boolean).length };
+    },
+  },
+  {
+    name: 'terrain_sample', title: 'Sample terrain heights',
+    description: 'Heights at points: natural ground and the ground graded to the roads (what you see). Water level is 0.',
+    schema: (z) => ({ points: z.array(z.array(z.number()).min(2)).min(1).max(2000) }),
+    run(s, { points }) {
+      return points.map(([x, y]) => ({ x, y, natural: round(s.natural(x, y)), graded: round(s.graded(x, y)) }));
+    },
+  },
+  {
+    name: 'terrain_edit', title: 'Shape the terrain',
+    description: 'Shape the natural ground in a circle (smooth falloff): raise / lower by `amount` metres at the centre, flatten towards `height` (default: the centre\'s height) with strength amount 0..1, or smooth with `amount` passes. Roads keep their cuts and embankments.',
+    schema: (z) => ({ x: z.number(), y: z.number(), radius: z.number().positive(), mode: z.enum(['raise', 'lower', 'flatten', 'smooth']), amount: z.number(), height: z.number().optional() }),
+    run(s, { x, y, radius, mode, amount, height }) {
+      const t = s.doc.layers.terrain;
+      if (!t) throw new Error('no terrain');
+      const rc = radius / t.res, ci = (x - t.x0) / t.res, cj = (y - t.y0) / t.res;
+      const box = [Math.max(1, Math.floor(ci - rc)), Math.max(1, Math.floor(cj - rc)), Math.min(t.nx - 2, Math.ceil(ci + rc)), Math.min(t.ny - 2, Math.ceil(cj + rc))];
+      const target = height ?? s.natural(x, y);
+      s.terrain(box, (h) => {
+        const passes = mode === 'smooth' ? Math.max(1, Math.round(amount)) : 1;
+        for (let p = 0; p < passes; p++) for (let j = box[1]; j <= box[3]; j++) for (let i = box[0]; i <= box[2]; i++) {
+          const d = Math.hypot(i - ci, j - cj) / rc;
+          if (d >= 1) continue;
+          const w = (1 - d * d) ** 2, k = j * t.nx + i;
+          if (mode === 'raise') h[k] += amount * w;
+          else if (mode === 'lower') h[k] -= amount * w;
+          else if (mode === 'flatten') h[k] += (target - h[k]) * Math.min(1, amount) * w;
+          else h[k] += ((h[k - 1] + h[k + 1] + h[k - t.nx] + h[k + t.nx]) / 4 - h[k]) * w;
+        }
+      }, `MCP: рельеф ${mode}`);
+      return { box, natural_at_centre: round(s.natural(x, y)), graded_at_centre: round(s.graded(x, y)) };
+    },
+  },
+  {
+    name: 'def_set', title: 'Set a registry entry',
+    description: 'Create or replace a type registry entry (value object), or delete it (value null). Groups: materials {color "#rrggbb", shininess, specular, glow, nightGlow, facade wall|curtain|brick|ribs|""}, buildingTypes {wall office|house|""}, zones {color}, surfaces {color, lift}, furniture {parts:[{k box|cyl|ico|cone, s:[w,d,h] | r, h, at:[x,y,z], c "#rrggbb"}]}, roadMaterials {color}, roadClasses {color}, roads.classes {lanes, lane_w, shoulder, median, side, corner, prio, r, sigma, max_grade, k_min, oneway}.',
+    schema: (z) => ({ group: z.string(), name: z.string(), value: z.any().nullable() }),
+    run(s, { group, name, value }) { s.setDef(group, name, value === null ? null : structuredClone(value)); return { group, name, deleted: value === null }; },
+  },
+  {
+    name: 'save', title: 'Save the world file',
+    description: 'Write the world to its .vspb file.',
+    schema: () => ({}),
+    async run(s) { return await s.save(); },
+  },
+  // ---- editor app only
+  {
+    name: 'screenshot', title: 'Screenshot the editor view', app: true,
+    description: 'Render the editor\'s 3D view and return it as an image. Optionally aim the camera first: camera [x,y,z] + target [x,y,z], or focus on a record (ref). Requires the Vespera Editor app (npm run app).',
+    schema: (z) => ({ camera: z.array(z.number()).length(3).optional(), target: z.array(z.number()).length(3).optional(),
+      focus: z.object(ref(z)).optional(), width: z.number().int().optional().describe('downscale to this width') }),
+    run(s, a) { return s.view(a); },
+  },
+  {
+    name: 'select', title: 'Select in the editor', app: true,
+    description: 'Select a record in the editor UI (shows its outline and properties) and focus the camera on it.',
+    schema: (z) => ref(z),
+    run(s, a) { const rec = resolve(s, a); s.select(a.kind, rec); return summary(s, a.kind, rec, list(s, a.kind).indexOf(rec)); },
+  },
+  {
+    name: 'undo', title: 'Undo', app: true, description: 'Undo the last edit in the editor (MCP edits are in the same history).',
+    schema: () => ({}), run(s) { return s.undo(); },
+  },
+  {
+    name: 'redo', title: 'Redo', app: true, description: 'Redo the last undone edit in the editor.',
+    schema: () => ({}), run(s) { return s.redo(); },
+  },
+];
+
+export const TOOL_BY_NAME = Object.fromEntries(TOOLS.map((t) => [t.name, t]));
+
+/** Run a tool and shape the MCP result content. */
+export async function runTool(session, name, args = {}) {
+  const tool = TOOL_BY_NAME[name];
+  if (!tool) return { isError: true, content: [{ type: 'text', text: `unknown tool ${name}` }] };
+  try {
+    const r = await tool.run(session, args);
+    if (r?.image) return { content: [{ type: 'image', data: r.image, mimeType: 'image/png' }, ...(r.text ? [{ type: 'text', text: r.text }] : [])] };
+    return { content: [{ type: 'text', text: JSON.stringify(r ?? { ok: true }, null, 1) }] };
+  } catch (e) {
+    return { isError: true, content: [{ type: 'text', text: String(e?.message ?? e) }] };
+  }
+}

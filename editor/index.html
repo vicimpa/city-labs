@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Vespera Editor</title>
+<title>City Labs</title>
 <style>
   :root { --bg: #0b0f14; --panel: rgba(14,19,26,.94); --line: #263241; --fg: #d8dde3; --muted: #7f8c9b; --acc: #3fb6ff; --warn: #f0b34a; --bad: #ff5a5a; }
   * { box-sizing: border-box; }
@@ -28,6 +28,8 @@
   #top .sep { width: 1px; height: 20px; background: var(--line); margin: 0 4px; }
   #save { margin-left: auto; color: var(--muted); white-space: nowrap; }
   #save.dirty { color: var(--warn); }
+  #update { background: #1f4d2b; border-color: #2f8a4a; white-space: nowrap; }
+  #update:disabled { opacity: .8; }
   #tools { position: fixed; top: 48px; left: 10px; width: 204px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 8px; z-index: 2; }
   #tools .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
   #tools .grid button { text-align: left; padding: 5px 6px; }
@@ -70,11 +72,12 @@
   #coords { position: fixed; right: 360px; bottom: 40px; font: 11px ui-monospace, monospace; color: var(--muted); z-index: 2; }
   #busy { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; background: rgba(5,8,12,.6); z-index: 10; font-size: 14px; }
   #busy[hidden] { display: none; }
+  body.shot #top, body.shot #tools, body.shot #side, body.shot #hint, body.shot #coords { display: none; }
 </style>
 </head>
 <body>
 <div id="top">
-  <b>Vespera Editor</b>
+  <b>City Labs</b>
   <button id="open" title="Открыть .vspb с диска">Открыть…</button>
   <button id="download" title="Скачать текущий мир как .vspb">Скачать .vspb</button>
   <button id="writeProject" title="Записать в city/data/vespera.vspb (только dev-сервер)" hidden>Записать в проект</button>
@@ -85,6 +88,7 @@
   <span class="sep"></span>
   <span id="source" class="muted"></span>
   <span id="save">—</span>
+  <button id="update" class="update" hidden></button>
   <input id="file" type="file" accept=".vspb" hidden>
 </div>
 <div id="tools">

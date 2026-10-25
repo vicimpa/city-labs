@@ -1,5 +1,5 @@
 {
-  "name": "race-game",
+  "name": "city-labs",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -9,18 +9,44 @@
     "test:vspb": "node test/vspb.compat.mjs && node test/vspb.roundtrip.mjs",
     "edit": "vite --config viewer/vite.config.js --open /editor/",
     "test:roads": "node test/roadbuild.compare.mjs",
-    "migrate": "node tools/migrate_src.mjs"
+    "migrate": "node tools/migrate_src.mjs",
+    "app": "node app/run.mjs",
+    "mcp": "node mcp/stdio.mjs",
+    "test:mcp": "node test/mcp.headless.mjs",
+    "postinstall": "node node_modules/electron/install.js",
+    "test:app": "node test/app.e2e.mjs",
+    "build:app": "node tools/build-app.mjs --asar",
+    "dist": "node tools/build-app.mjs --asar && electron-builder",
+    "test": "npm run test:vspb && npm run test:mcp && npm run test:roads",
+    "test:update": "node test/app.update.mjs"
   },
   "dependencies": {
     "@dimforge/rapier3d-compat": "^0.21.0",
-    "three": "^0.186.1"
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "three": "^0.186.1",
+    "zod": "^4.6.7"
   },
   "devDependencies": {
+    "@electron/asar": "^4.3.1",
     "@playwright/test": "^1.64.1",
     "@types/node": "^26.6.5",
     "@types/three": "^0.186.0",
+    "electron": "^45.0.0",
+    "electron-builder": "^26.18.0",
     "typescript": "5.9",
     "vite": "^8.3.5",
     "vitest": "^5.0.5"
-  }
+  },
+  "main": "app/dev.mjs",
+  "productName": "City Labs",
+  "description": "City Labs — редактор города: дороги, рельеф, здания и типы в одном файле .vspb, с MCP для ИИ-агентов",
+  "cityLabs": {
+    "shell": 1,
+    "repo": "vicimpa/city-labs"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/vicimpa/city-labs.git"
+  },
+  "author": "vicimpa"
 }

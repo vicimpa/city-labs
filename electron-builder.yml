@@ -1,0 +1,43 @@
+# City Labs installers. The app dir is prepared by `npm run build:app` (tools/build-app.mjs):
+# the shell (boot/) plus the built-in code bundle (bundle/); no node_modules are shipped.
+appId: io.github.vicimpa.citylabs
+productName: City Labs
+copyright: Copyright © 2026 vicimpa
+directories:
+  app: build/app
+  output: release
+asar: true
+# everything the app needs is inlined into bundle/main.cjs: ship no node_modules
+files:
+  - '**/*'
+  - '!**/node_modules/**'
+npmRebuild: false
+fileAssociations:
+  - ext: vspb
+    name: City Labs world
+    role: Editor
+mac:
+  target:
+    - target: dmg
+  category: public.app-category.developer-tools
+  identity: null          # no Developer ID: unsigned (the shell offers new builds as downloads)
+  artifactName: City-Labs-${version}-mac-${arch}.${ext}
+dmg:
+  writeUpdateInfo: false
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+  artifactName: City-Labs-${version}-win-${arch}.${ext}
+nsis:
+  oneClick: true
+  perMachine: false
+  differentialPackage: false
+linux:
+  target:
+    - target: AppImage
+      arch: [x64]
+  category: Development
+  artifactName: City-Labs-${version}-linux-${arch}.${ext}
+publish: null
+electronVersion: 45.0.0

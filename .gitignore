@@ -11,3 +11,6 @@ city/data/*.json
 test-results/
 # CC0 Poly Haven textures/HDRIs from the Blender era (re-downloadable, unused by the web renderer)
 city/assets/
+*.vspb.tmp
+build/
+release/

@@ -12,9 +12,12 @@ import { bbox } from '../world/roadworld.js';
 import { syncClassWidths, groundSampler } from '../world/roadnet.js';
 import { carveRegion } from '../world/carve.js';
 import { cumLength, smoothstep } from '../world/geom.js';
+import { runTool } from '../mcp/ops.js';
 import { inspector, h } from './inspector.js';
 
 const SRC = '/city/data/vespera.vspb', TILE = 600;
+// desktop app (app/preload.cjs): the world is a file on disk, saved explicitly; MCP calls arrive here
+const host = window.vspbHost ?? null;
 const $ = (id) => document.getElementById(id);
 const r2 = (v) => Math.round(v * 100) / 100;
 
@@ -85,6 +88,7 @@ async function serverStamp() {
 
 async function boot() {
   busy('загрузка…');
+  if (host) return bootApp();
   try {
     const w = await loadWorking().catch(() => null);
     const stamp = await serverStamp();
@@ -118,40 +122,69 @@ function setDoc(d, ch, src, stamp) {
   hist.done.length = 0; hist.undone.length = 0;
   sel = null; draw = null; drag = null;
   $('source').textContent = src;
-  document.title = 'Vespera Editor — ' + src;
+  document.title = 'City Labs — ' + src;
   updateUndo(); renderDefs(); renderLayers(); renderFind(); select(null); setTool(tool);
 }
 
-let saveTimer = 0, saving = false, savedAt = 0;
+let saveTimer = 0, saving = false, savedAt = 0, unsaved = false;
 function setSaveState(s, at) {
   const el = $('save');
   if (at) savedAt = at;
   el.className = s === 'dirty' ? 'dirty' : '';
+  const where = host ? 'на диск' : 'в браузере';
   el.textContent = s === 'dirty' ? '● есть несохранённые правки' : s === 'saving' ? 'сохранение…'
-    : s === 'clean' ? 'без правок' : `сохранено в браузере ${new Date(savedAt).toLocaleTimeString()}`;
+    : s === 'clean' ? 'без правок' : `сохранено ${where} ${new Date(savedAt).toLocaleTimeString()}`;
+  if (host) {
+    unsaved = s === 'dirty' || (s === 'saving' && unsaved);
+    host.setDirty(unsaved);
+    host.setTitle(`${unsaved ? '● ' : ''}${source.split(/[\\/]/).pop()} — City Labs`);
+  }
 }
-function markDirty(layer) { dirty.add(layer); setSaveState('dirty'); clearTimeout(saveTimer); saveTimer = setTimeout(saveNow, 2000); }
+function markDirty(layer) {
+  dirty.add(layer); setSaveState('dirty');
+  if (host) return;                       // the app saves on Cmd+S, the browser autosaves to IndexedDB
+  clearTimeout(saveTimer); saveTimer = setTimeout(saveNow, 2000);
+}
 
-async function saveNow() {
+// re-encode the layers changed since the last save (encoding is synchronous up to compression: a consistent snapshot)
+async function encodeChunks() {
+  for (const name of Object.keys(doc.layers)) {
+    if (!dirty.has(name) && chunks[name]) continue;
+    dirty.delete(name);
+    chunks[name] = await encodeWorldLayer(doc, name);
+  }
+  for (const name of Object.keys(chunks)) if (!doc.layers[name]) delete chunks[name];
+}
+
+/** Save: to IndexedDB in the browser, to the file in the app (as: pick a new path). Returns false if nothing was written. */
+async function saveNow({ as = false } = {}) {
   clearTimeout(saveTimer);
-  if (drag || saving) { saveTimer = setTimeout(saveNow, 1000); return; }
+  if (drag || saving) { if (!host) saveTimer = setTimeout(saveNow, 1000); return false; }
   saving = true; setSaveState('saving');
+  let ok = false;
   try {
-    for (const name of Object.keys(doc.layers)) {
-      if (!dirty.has(name) && chunks[name]) continue;
-      dirty.delete(name);
-      chunks[name] = await encodeWorldLayer(doc, name);   // encodes synchronously up to compression: a consistent snapshot
+    await encodeChunks();
+    if (host) {
+      const bytes = await assembleFile();
+      const r = await (as ? host.saveAs(bytes) : host.save(bytes));
+      if (r) { source = r.path; $('source').textContent = source; ok = true; }
+      setSaveState(ok ? 'saved' : 'dirty', Date.now());
+    } else {
+      await saveWorking({ meta: doc.meta ?? {}, chunks, unknown: doc.unknown ?? [], savedAt: Date.now(), baseStamp });
+      ok = true;
+      setSaveState(dirty.size ? 'dirty' : 'saved', Date.now());
     }
-    for (const name of Object.keys(chunks)) if (!doc.layers[name]) delete chunks[name];
-    await saveWorking({ meta: doc.meta ?? {}, chunks, unknown: doc.unknown ?? [], savedAt: Date.now(), baseStamp });
-    setSaveState(dirty.size ? 'dirty' : 'saved', Date.now());
   } catch (e) { console.error(e); $('save').textContent = 'ошибка сохранения: ' + e.message; }
   saving = false;
-  if (dirty.size) saveTimer = setTimeout(saveNow, 1000);
+  if (!host && dirty.size) saveTimer = setTimeout(saveNow, 1000);
+  return ok;
 }
 
 async function fileBytes() {
   await saveNow();
+  return assembleFile();
+}
+function assembleFile() {
   const ordered = {};
   for (const n of [...LAYERS, ...Object.keys(chunks)]) if (chunks[n] && !ordered[n]) ordered[n] = chunks[n];
   return assemble({ ...(doc.meta ?? {}), editor: 'vespera-editor', saved: new Date().toISOString() }, ordered, doc.unknown);
@@ -200,6 +233,113 @@ async function resetToProject() {
 $('reset').onclick = () => { if (confirm('Выбросить все правки из браузера и загрузить файл проекта?')) resetToProject(); };
 $('undo').onclick = () => hist.undo();
 $('redo').onclick = () => hist.redo();
+
+// ---------------------------------------------------------------- desktop app: the file on disk
+async function bootApp() {
+  try {
+    const f = await host.current();
+    if (!f) { busy('Нет файла мира — откройте .vspb (Cmd+O)'); return; }
+    setDoc(await decodeWorld(f.bytes), {}, f.path, null);
+    setSaveState('clean');
+  } catch (e) { console.error(e); busy('Ошибка загрузки: ' + e.message); return; }
+  busy('');
+}
+async function openFromApp(f) {
+  if (!f) return;
+  busy('чтение…');
+  try { setDoc(await decodeWorld(f.bytes), {}, f.path, null); setSaveState('clean'); } catch (e) { alert('Не удалось открыть: ' + e.message); } finally { busy(''); }
+}
+const reloadFromDisk = async () => openFromApp(await host.reload());
+if (host) {
+  // the top bar becomes Save / Save as / Reload; downloads and the dev-server write-back are browser things
+  $('download').textContent = 'Сохранить'; $('download').title = 'Сохранить в файл (Cmd+S)';
+  $('download').onclick = () => saveNow();
+  $('writeProject').hidden = false; $('writeProject').textContent = 'Сохранить как…'; $('writeProject').title = 'Shift+Cmd+S';
+  $('writeProject').onclick = () => saveNow({ as: true });
+  $('reset').textContent = 'Перечитать'; $('reset').title = 'Загрузить файл с диска заново';
+  $('reset').onclick = () => { if (!unsaved || confirm('Выбросить несохранённые правки и перечитать файл?')) reloadFromDisk(); };
+  $('open').onclick = async () => { if (!unsaved || confirm('Есть несохранённые правки. Открыть другой файл?')) openFromApp(await host.open()); };
+  host.on('menu', (what) => {
+    if (what === 'open') $('open').onclick();
+    else if (what === 'save') saveNow();
+    else if (what === 'saveAs') saveNow({ as: true });
+    else if (what === 'reload') $('reset').onclick();
+  });
+  host.on('file:changed', () => {
+    if (!unsaved) { reloadFromDisk(); hint('Файл изменён снаружи — перечитан'); return; }
+    showWarning('Файл мира изменён на диске (другой программой).', [['Перечитать с диска', reloadFromDisk], ['Оставить мои правки', () => {}]]);
+  });
+  host.on('app:save-and-close', async () => { if (await saveNow()) host.closeNow(); });
+  host.on('mcp:call', async ({ id, name, args }) => host.toolResult(id, await mcpCall(name, args)));
+  host.on('update', renderUpdate);
+  host.info().then((i) => renderUpdate(i.update)).catch(() => {});
+}
+// update states from the shell: a new code bundle (downloads itself, restart to apply) or a new build (installer)
+function renderUpdate(st) {
+  const b = $('update');
+  b.hidden = !st || st.kind === 'none' || st.kind === 'error';
+  if (b.hidden) return;
+  const pct = st.progress != null && st.progress < 1 ? ` ${Math.round(st.progress * 100)}%` : '';
+  b.disabled = !!pct;
+  if (st.kind === 'asar') {
+    b.textContent = pct ? `Загрузка обновления ${st.version}${pct}` : `Обновление ${st.version} — перезапустить`;
+    b.title = 'Новый код редактора загружен; применится после перезапуска';
+    b.onclick = async () => { if (!unsaved || (await saveNow())) host.update('restart'); };
+  } else {
+    b.textContent = pct ? `Скачивание ${st.version}${pct}` : `Новая версия ${st.version} — скачать`;
+    b.title = 'Вышла новая сборка приложения: её нужно установить заново';
+    b.onclick = () => host.update('download');
+  }
+}
+
+// ---------------------------------------------------------------- MCP session: agent edits go through the same undo history
+const mcpSession = {
+  get doc() { return doc; },
+  kinds: KINDS,
+  natural: (x, y) => groundSampler(doc.layers.terrain)(x, y),
+  graded: (x, y) => world.H?.(x, y) ?? 0,
+  info: () => ({ file: source, unsaved, app: true, selection: sel && { kind: sel.kind, title: KINDS[sel.kind].title(sel.rec) } }),
+  edit(kind, rec, fn, label) { const t = beginEdit(kind, rec); fn(rec); refreshFor(kind, rec)(); t.commit(label); },
+  insert(kind, rec, label) { hist.insert(kind, list(kind), rec, undefined, label, refreshFor(kind, rec)); },
+  remove(kind, rec, label) { hist.remove(kind, list(kind), rec, label, refreshFor(kind, rec)); },
+  roadTx(tx, label) { commitRoadTx(tx, label); },
+  terrain(box, fn, label) {
+    const T = doc.layers.terrain, blocks = [];
+    for (let bj = Math.floor(box[1] / BLOCK); bj <= Math.floor(box[3] / BLOCK); bj++)
+      for (let bi = Math.floor(box[0] / BLOCK); bi <= Math.floor(box[2] / BLOCK); bi++) blocks.push({ bi, bj, before: readBlock(T, bi, bj) });
+    fn(T.base);
+    carveRegion(T, world.roadWorld.net, box);
+    for (const b of blocks) b.after = readBlock(T, b.bi, b.bj);
+    world.terrainChanged(box); markDirty('terrain');
+    hist.custom(label, 'terrain', () => { writeBlocks(T, blocks, 'before'); world.terrainChanged(box); markDirty('terrain'); },
+      () => { writeBlocks(T, blocks, 'after'); world.terrainChanged(box); markDirty('terrain'); });
+  },
+  setDef(group, name, value) {
+    const map = groupObj(group), old = map[name] === undefined ? null : clone(map[name]);
+    const apply = (v) => { if (v === null) delete map[name]; else map[name] = clone(v); refreshDefs(group, name); renderDefs(); };
+    apply(value);
+    hist.custom(`MCP: тип ${group}.${name}`, 'def', () => apply(old), () => apply(value));
+  },
+  async save() { if (!(await saveNow())) throw new Error('not saved (busy or the save dialog was cancelled)'); return { file: source }; },
+  select(kind, rec) { select(kind, rec); focusSel(); },
+  undo() { const c = hist.done.at(-1); if (!c) throw new Error('nothing to undo'); hist.undo(); return { undone: c.label }; },
+  redo() { const c = hist.undone.at(-1); if (!c) throw new Error('nothing to redo'); hist.redo(); return { redone: c.label }; },
+  // aim the camera, hide the panels and let a couple of frames render; the app grabs the window next
+  async view(a) {
+    if (a.focus) { select(a.focus.kind, a.focus.id !== undefined ? list(a.focus.kind).find((r) => r.id === a.focus.id) : list(a.focus.kind)[a.focus.index]); focusSel(); }
+    if (a.camera && a.target) { camera.position.set(...a.camera); controls.target.set(...a.target); controls.update(); }
+    else if (a.target) { controls.target.set(...a.target); controls.update(); }
+    document.body.classList.add('shot');
+    for (let k = 0; k < 3; k++) await new Promise((r) => requestAnimationFrame(r));
+    const f = (v) => v.toArray().map((x) => Math.round(x * 10) / 10);
+    return { camera: f(camera.position), target: f(controls.target) };
+  },
+};
+async function mcpCall(name, args) {
+  if (name === '__ui') { document.body.classList.toggle('shot', !!args.shot); return { content: [{ type: 'text', text: 'ok' }] }; }
+  if (!doc) return { isError: true, content: [{ type: 'text', text: 'no world is open' }] };
+  return runTool(mcpSession, name, args);
+}
 
 function showWarning(text, actions) {
   const box = h('div', { class: 'warn', style: 'position:fixed;top:46px;left:50%;transform:translateX(-50%);z-index:5;background:#2a2112;max-width:620px' }, text, ' ');
