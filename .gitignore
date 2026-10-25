@@ -14,3 +14,4 @@ city/assets/
 *.vspb.tmp
 build/
 release/
+dist-web/

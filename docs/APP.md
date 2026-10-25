@@ -55,6 +55,9 @@ The tools are defined once in `mcp/ops.js`, against an abstract session, and are
 | `road_add` | lays a road through points; its ends attach to nodes or split the road they land on |
 | `road_reprofile` | re-levels a road over the natural ground |
 | `terrain_sample` / `terrain_edit` | heights, and raise / lower / flatten / smooth of the natural ground |
+| `map` | a top-down map image of an area (or the whole city), with numbered roads in the legend; works without the app |
+| `run_script` | JavaScript over the world for queries and bulk edits: one undo step, derived data rebuilt once |
+| `generate` | a standard generator with parameters (`terrain`, `streets`, `buildings`, `trees`): one undo step |
 | `def_set` | creates, replaces or deletes a registry entry |
 | `save` | writes the file |
 | `screenshot` (app) | the 3D view as a PNG, optionally after aiming the camera or focusing a record |
@@ -63,9 +66,71 @@ The tools are defined once in `mcp/ops.js`, against an abstract session, and are
 Derived data (asphalt, junctions, bents, graded terrain, road furniture) is rebuilt after every
 call, as it is for edits made by hand.
 
+### Maps
+
+`map` draws the area from the data: shaded terrain, water, ground patches, roads (a dark edge marks a
+bridge, a dashed line a tunnel), buildings coloured by material, rails, trees and a grid labelled
+in metres. Markers on the longest visible roads are explained in the text part of the result
+(number → road id and name), along with the scale. Give `center` + `size_m` or a `bbox`; with
+neither, it draws the whole map. `highlight` outlines records in magenta.
+
+### Scripts
+
+`run_script` runs `code` as the body of `async function (world, args)`. The API is described in
+the tool description and in the editor's **Script** tab, which runs the same code with the same
+API. Example:
+
+```js
+const t = world.find('building', (b) => b.type === 'tower' && b.zone === 'downtown');
+for (const { rec } of t) world.edit('building', rec, (b) => b.parts.forEach((p) => { p.h *= 1.1; }));
+return t.length;
+```
+
+All edits of one run are one undo step. Derived geometry is rebuilt once, at the end. A script runs
+in the app's or the server's process, so only run code you trust.
+
+### Generators
+
+Generators live in `mcp/generators.js`, on the same world API as scripts. Each one is a list of
+typed parameters plus a `run(world, params)`. The editor's **Generators** tab builds its form from
+that list, and its centre fields default to the point the camera looks at. MCP `generate` takes
+`{ id, params }`, and omitted parameters take their defaults. A whole run is one undo step.
+
+| id | parameters |
+| --- | --- |
+| `terrain` | amplitude, wavelength, octaves, base height, island, mode (replace / add), seed |
+| `streets` | centre, width × depth, block size, rotation, bend, street class, avenue every N, avenue class, seed |
+| `buildings` | centre, radius, zone preset, floors from / to, density, setback, seed |
+| `trees` | centre, radius, trees per hectare, patchiness, seed |
+
+To add a generator, give it an entry in `GENERATORS`, plus `gen.<id>`, `gen.<id>.help` and
+`gen.p.<param>` in both locales.
+
+## Window and language
+
+- **No system title bar.** The editor's top bar is the title bar. On macOS the traffic lights sit
+  at its left. On Windows and Linux the system buttons sit at its right, and a ☰ button opens the
+  app menu. Drag the bar to move the window; double-click it to maximize.
+- **Languages: Russian and English.** Use the switch at the top right; the first launch follows the
+  system language. The choice also applies to the menu, the dialogs and the splash. The strings live
+  in `editor/locales/{ru,en}.js` under keys such as `save.dirty`, and `npm test` checks that every
+  key the UI uses exists in both locales.
+
+## Files and the web version
+
+- **Start-up.** Both the app and the web editor start with a new empty map. The browser continues
+  its IndexedDB working copy if there is one. The sample city opens with the **Sample** button.
+- **File association.** The installers register `.vspb`. On macOS a double-click reaches the app as
+  `open-file`. On Windows and Linux the path arrives on the command line, or through the running
+  instance (single-instance lock). If the open map has unsaved changes, the editor asks first.
+- **Web version.** <https://vicimpa.github.io/city-labs/> is built by `npm run build:web` and
+  published by `.github/workflows/pages.yml` on every push to `main`. Files are opened from disk
+  and saved by downloading; the working copy stays in IndexedDB.
+
 ## Tests
 
 ```
+npm test            # localization keys, format, MCP headless (incl. map and scripts), road builder
 npm run test:mcp    # stdio server headless on a scratch copy: every tool, then re-read the saved file
 npm run test:app    # desktop app end to end (Playwright Electron) on a scratch copy and port 7399
 ```

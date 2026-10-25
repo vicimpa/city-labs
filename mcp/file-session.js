@@ -28,8 +28,19 @@ export class FileSession {
     return t ? groundSampler({ ...t, base: t.h })(x, y) : 0;
   };
 
+  /** Run fn with road rebuilds deferred to one update at the end (scripts, bulk edits). */
+  async batch(_label, fn) {
+    if (this.deferred) return fn();
+    this.deferred = { recs: new Set(), before: [] };
+    try { await fn(); } finally {
+      const d = this.deferred;
+      this.deferred = null;
+      if (d.recs.size) this.roadsChanged([...d.recs], d.before);
+    }
+  }
   // road records changed: derived geometry, owned furniture and graded terrain follow
   roadsChanged(recs, before) {
+    if (this.deferred) { for (const r of recs) this.deferred.recs.add(r); this.deferred.before.push(...before); return; }
     const change = { edges: [], nodes: [], before };
     for (const r of recs) if (r.pts) change.edges.push(r.id); else if (r.p) change.nodes.push(r.id);
     this.roads.update(change);

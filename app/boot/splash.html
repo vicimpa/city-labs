@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="ru">
+<html>
 <head>
 <meta charset="utf-8">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'">
@@ -29,16 +29,18 @@
   <div class="logo"></div>
   <h1>City Labs</h1>
   <div id="ver"></div>
-  <div id="text">Запуск…</div>
+  <div id="text"></div>
   <div class="bar" id="bar"><i id="fill"></i></div>
   <div class="buttons" id="buttons">
-    <button class="primary" onclick="window.splash.choose('download')">Скачать</button>
-    <button onclick="window.splash.choose('later')">Позже</button>
+    <button class="primary" id="dl" onclick="window.splash.choose('download')">Download</button>
+    <button id="later" onclick="window.splash.choose('later')">Later</button>
   </div>
 </main>
 <script>
   window.show = (st) => {
-    if (st.version) document.getElementById('ver').textContent = 'версия ' + st.version;
+    const L = st.labels ?? {};
+    if (L.version) document.getElementById('ver').textContent = L.version;
+    if (L.download) { document.getElementById('dl').textContent = L.download; document.getElementById('later').textContent = L.later; }
     if (st.text) document.getElementById('text').textContent = st.text;
     const bar = document.getElementById('bar'), fill = document.getElementById('fill');
     bar.style.visibility = st.offer ? 'hidden' : 'visible';

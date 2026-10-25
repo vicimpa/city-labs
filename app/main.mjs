@@ -11,6 +11,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { z } from 'zod';
 import { TOOLS, TOOL_BY_NAME } from '../mcp/ops.js';
+import { t, setLang } from '../editor/i18n.js';
 
 export const APP_NAME = 'City Labs';
 const MCP_PORT = +(process.env.VSPB_MCP_PORT ?? 7357);
@@ -29,16 +30,23 @@ function sampleWorld() {
   if (!fs.existsSync(dst)) { fs.mkdirSync(path.dirname(dst), { recursive: true }); fs.writeFileSync(dst, fs.readFileSync(path.join(opts.bundleDir, 'sample/vespera.vspb'))); }
   return dst;
 }
+// a .vspb named on the command line (Windows / Linux file associations, scripts)
+export const vspbArg = (argv) => { const a = argv.slice(1).find((x) => x.toLowerCase().endsWith('.vspb') && !x.startsWith('-')); return a && path.resolve(a); };
+/** The world to open at start: one handed over by the system, or none (the editor starts a new map). */
 function pickStartFile() {
-  const arg = process.argv.slice(1).find((a) => a.endsWith('.vspb'));
-  const last = readState().lastFile;
-  for (const f of [arg && path.resolve(arg), last]) if (f && fs.existsSync(f)) return f;
-  return sampleWorld();
+  for (const f of [opts.openFile, vspbArg(process.argv)]) if (f && fs.existsSync(f)) return f;
+  return null;
+}
+/** The system asks to open a file while the app runs: the editor decides (it may have unsaved work). */
+export function openRequest(f) {
+  if (!f || !win) return;
+  if (win.isMinimized()) win.restore();
+  win.focus();
+  win.webContents.send('file:open-request', { path: f });
 }
 function setFile(f) {
   file = f;
-  writeState({ lastFile: f });
-  app.addRecentDocument?.(f);
+  if (f) app.addRecentDocument?.(f);
   watcher?.close();
   watcher = null;
   if (!f) return;
@@ -64,6 +72,9 @@ const fileFilter = [{ name: 'Vespera world', extensions: ['vspb'] }];
 
 ipcMain.handle('file:current', () => (file ? { path: file, bytes: fs.readFileSync(file) } : null));
 ipcMain.handle('file:reload', () => (file ? { path: file, bytes: fs.readFileSync(file) } : null));
+ipcMain.handle('file:new', () => { setFile(null); return null; });
+ipcMain.handle('file:openPath', (_e, f) => { setFile(f); return { path: f, bytes: fs.readFileSync(f) }; });
+ipcMain.handle('file:sample', () => { setFile(sampleWorld()); return { path: file, bytes: fs.readFileSync(file) }; });
 ipcMain.handle('file:open', async () => {
   const r = await dialog.showOpenDialog(win, { properties: ['openFile'], filters: fileFilter, defaultPath: file ? path.dirname(file) : app.getPath('documents') });
   if (r.canceled || !r.filePaths[0]) return null;
@@ -84,7 +95,12 @@ async function saveAs(bytes) {
   return { path: file };
 }
 ipcMain.on('doc:dirty', (_e, d) => { dirty = !!d; win?.setDocumentEdited?.(dirty); });
-ipcMain.on('doc:title', (_e, t) => win?.setTitle(t));
+ipcMain.on('doc:title', (_e, title) => win?.setTitle(title));
+// the editor's language also drives the menu, dialogs and (via state.json) the shell's splash
+ipcMain.on('app:lang', (_e, l) => { setLang(l); writeState({ lang: l }); buildMenu(); });
+// the ☰ button in the editor's top bar (Windows / Linux have no menu bar without a title bar)
+ipcMain.on('app:menu', (_e, { x, y }) => Menu.getApplicationMenu()?.popup({ window: win, x: Math.round(x), y: Math.round(y) }));
+ipcMain.on('app:zoom', () => { if (!win) return; if (win.isMaximized()) win.unmaximize(); else win.maximize(); });
 ipcMain.on('app:close-now', () => { forceClose = true; win?.close(); });
 ipcMain.handle('app:info', () => ({ name: APP_NAME, version: opts.version, shell: opts.shell, mode: opts.mode,
   mcpPort: MCP_PORT, mcpUrl: `http://127.0.0.1:${MCP_PORT}/mcp`, update: opts.updater?.state ?? null }));
@@ -158,27 +174,28 @@ function buildMenu() {
   const mac = process.platform === 'darwin';
   Menu.setApplicationMenu(Menu.buildFromTemplate([
     ...(mac ? [{ role: 'appMenu' }] : []),
-    { label: 'Файл', submenu: [
-      { label: 'Открыть…', accelerator: 'CmdOrCtrl+O', click: send('open') },
-      { label: 'Сохранить', accelerator: 'CmdOrCtrl+S', click: send('save') },
-      { label: 'Сохранить как…', accelerator: 'Shift+CmdOrCtrl+S', click: send('saveAs') },
-      { label: 'Перечитать с диска', click: send('reload') },
+    { label: t('menu.file'), submenu: [
+      { label: t('menu.new'), accelerator: 'CmdOrCtrl+N', click: send('new') },
+      { label: t('common.open'), accelerator: 'CmdOrCtrl+O', click: send('open') },
+      { label: t('common.save'), accelerator: 'CmdOrCtrl+S', click: send('save') },
+      { label: t('common.saveAs'), accelerator: 'Shift+CmdOrCtrl+S', click: send('saveAs') },
+      { label: t('file.reloadFromDisk'), click: send('reload') },
       { type: 'separator' },
-      { label: 'Открыть пример — Vespera Bay', click: () => { setFile(sampleWorld()); win?.webContents.send('menu', 'reload'); } },
-      { label: 'Показать файл в Finder', click: () => file && shell.showItemInFolder(file) },
+      { label: t('menu.openSample'), click: send('sample') },
+      { label: t(process.platform === 'darwin' ? 'menu.showInFinder' : 'menu.showInFolder'), click: () => file && shell.showItemInFolder(file) },
       ...(mac ? [] : [{ type: 'separator' }, { role: 'quit' }]),
     ] },
     // no undo/redo roles here: Cmd+Z goes to the editor's own history
-    { label: 'Правка', submenu: [{ role: 'cut' }, { role: 'copy' }, { role: 'paste' }, { role: 'selectAll' }] },
-    { label: 'Вид', submenu: [{ role: 'toggleDevTools' }, { type: 'separator' }, { role: 'resetZoom' }, { role: 'zoomIn' }, { role: 'zoomOut' }, { type: 'separator' }, { role: 'togglefullscreen' }] },
-    { label: 'Справка', submenu: [
-      { label: `${APP_NAME} ${opts.version ?? ''} (оболочка ${opts.shell ?? '—'})`, enabled: false },
-      { label: 'Проверить обновления…', enabled: !!opts.updater, click: () => opts.updater?.check(true) },
-      { label: 'Страница проекта', click: () => shell.openExternal('https://github.com/vicimpa/city-labs') },
+    { label: t('menu.edit'), submenu: [{ role: 'cut' }, { role: 'copy' }, { role: 'paste' }, { role: 'selectAll' }] },
+    { label: t('menu.view'), submenu: [{ role: 'toggleDevTools' }, { type: 'separator' }, { role: 'resetZoom' }, { role: 'zoomIn' }, { role: 'zoomOut' }, { type: 'separator' }, { role: 'togglefullscreen' }] },
+    { label: t('menu.help'), submenu: [
+      { label: t('menu.version', { app: APP_NAME, v: opts.version ?? '', shell: opts.shell ?? '—' }), enabled: false },
+      { label: t('menu.checkUpdates'), enabled: !!opts.updater, click: () => opts.updater?.check(true) },
+      { label: t('menu.projectPage'), click: () => shell.openExternal('https://github.com/vicimpa/city-labs') },
     ] },
     { label: 'MCP', submenu: [
-      { label: `Сервер: http://127.0.0.1:${MCP_PORT}/mcp`, enabled: false },
-      { label: 'Скопировать команду для Claude Code', click: () => clipboard.writeText(`claude mcp add --transport http vespera-editor http://127.0.0.1:${MCP_PORT}/mcp`) },
+      { label: t('menu.mcpServer', { url: `http://127.0.0.1:${MCP_PORT}/mcp` }), enabled: false },
+      { label: t('menu.copyClaudeCommand'), click: () => clipboard.writeText(`claude mcp add --transport http city-labs http://127.0.0.1:${MCP_PORT}/mcp`) },
     ] },
   ]));
 }
@@ -187,14 +204,18 @@ async function createWindow() {
   const st = readState();
   win = new BrowserWindow({ width: st.bounds?.width ?? 1600, height: st.bounds?.height ?? 1000, x: st.bounds?.x, y: st.bounds?.y,
     backgroundColor: '#0b0f14', title: APP_NAME, show: false,
+    // no system title bar: the editor's top bar is the title bar (traffic lights / window buttons sit in it)
+    titleBarStyle: 'hidden',
+    ...(process.platform === 'darwin' ? { trafficLightPosition: { x: 13, y: 12 } }
+      : { titleBarOverlay: { color: '#0e131a', symbolColor: '#d8dde3', height: 38 } }),
     webPreferences: { preload: opts.preload, contextIsolation: true, sandbox: true } });
   win.once('ready-to-show', () => win.show());
   win.on('close', (e) => {
     writeState({ bounds: win.getBounds() });
     if (!dirty || forceClose) return;
     e.preventDefault();
-    const r = dialog.showMessageBoxSync(win, { type: 'question', buttons: ['Сохранить', 'Не сохранять', 'Отмена'], defaultId: 0, cancelId: 2,
-      message: `Сохранить изменения в ${file ? path.basename(file) : 'новом мире'}?` });
+    const r = dialog.showMessageBoxSync(win, { type: 'question', buttons: [t('common.save'), t('dialog.dontSave'), t('dialog.cancel')], defaultId: 0, cancelId: 2,
+      message: file ? t('dialog.saveChanges', { name: path.basename(file) }) : t('dialog.saveChangesNew') });
     if (r === 0) win.webContents.send('app:save-and-close');
     else if (r === 1) { forceClose = true; win.close(); }
   });
@@ -221,6 +242,7 @@ function serveBundle(webDir) {
 /** Start the editor. mode 'dev': repo at opts.root, Vite dev server; mode 'prod': built bundle at opts.bundleDir. */
 export async function start(o) {
   opts = o;
+  if (o.mode === 'dev' && devPending) o.openFile ??= devPending;
   await app.whenReady();
   if (o.mode === 'dev') {
     process.chdir(o.root);
@@ -235,11 +257,17 @@ export async function start(o) {
     o.url = 'app://city-labs/editor/index.html?host=app';
   }
   o.updater?.on((state) => win?.webContents.send('update', state));
+  setLang(readState().lang ?? (app.getLocale().toLowerCase().startsWith('ru') ? 'ru' : 'en'));
   setFile(pickStartFile());
   buildMenu();
   startMcp();
   return createWindow();
 }
-app.on('open-file', (e, f) => { e.preventDefault(); if (f.endsWith('.vspb') && win) { setFile(f); win.webContents.send('menu', 'reload'); } });
+// in dev there is no shell: take the system's open requests here (the shell forwards them when installed)
+if (!process.env.CITY_LABS_SHELL) {
+  app.on('open-file', (e, f) => { e.preventDefault(); if (win) openRequest(f); else devPending = f; });
+  app.on('second-instance', (_e, argv) => openRequest(vspbArg(argv)));
+}
+let devPending = null;
 app.on('window-all-closed', () => app.quit());
 app.on('will-quit', () => { watcher?.close(); mcpHttp?.close(); vite?.close(); });

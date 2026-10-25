@@ -98,7 +98,7 @@ function terrainColor(z, c) {
 // exactly instead of along 6 m grid triangles. Tube axes go to the shader as a segment texture,
 // grouped into runs with bounding boxes so most fragments skip the test.
 const TUBE_H = 7.3, MAX_RUNS = 32;
-function tunnelClip(material, roads) {
+function tunnelClip(material, roads, then = null) {
   const seg = [], runs = [];
   for (const ed of roads.edges) {
     const W = (roads.classes[ed.cls]?.hw ?? 4) + 0.8;
@@ -113,7 +113,7 @@ function tunnelClip(material, roads) {
         Math.max(run.box[2], ax + W, bx + W), Math.max(run.box[3], ay + W, by + W)];
     }
   }
-  if (!runs.length) return;
+  if (!runs.length) { if (then) material.onBeforeCompile = then; return; }
   if (runs.length > MAX_RUNS) console.warn(`tunnelClip: ${runs.length} runs, only ${MAX_RUNS} clipped`);
   const n = seg.length / 4, tw = 1024, th = Math.ceil(n / tw);
   const data = new Float32Array(tw * th * 4); data.set(seg);
@@ -154,12 +154,37 @@ bool inTube(vec3 p) {
   return false;
 }`)
       .replace('void main() {', 'void main() {\n  if (inTube(vTubeW)) discard;');
+    then?.(sh);
   };
+}
+
+// Ground grid in the terrain shader: follows the heightfield and brush edits for free. Lines are
+// anti-aliased with screen-space derivatives and fade out where they would crowd into moiré.
+function groundGrid(sh, on) {
+  sh.uniforms.gridOn = on;
+  sh.vertexShader = sh.vertexShader
+    .replace('#include <common>', '#include <common>\nvarying vec3 vGridW;')
+    .replace('#include <worldpos_vertex>', '#include <worldpos_vertex>\nvGridW = (modelMatrix * vec4(transformed, 1.0)).xyz;');
+  sh.fragmentShader = sh.fragmentShader
+    .replace('#include <common>', `#include <common>
+varying vec3 vGridW;
+uniform float gridOn;
+float gridLine(vec2 p, float step) {
+  vec2 c = p / step, w = fwidth(c);
+  vec2 g = abs(fract(c - 0.5) - 0.5) / max(w, vec2(1e-4));
+  float fade = 1.0 - smoothstep(0.15, 0.45, max(w.x, w.y));
+  return (1.0 - min(min(g.x, g.y), 1.0)) * fade;
+}`)
+    .replace('#include <opaque_fragment>', `#include <opaque_fragment>
+if (gridOn > 0.5) {
+  float minor = gridLine(vGridW.xy, 100.0), major = gridLine(vGridW.xy, 500.0);
+  gl_FragColor.rgb = mix(gl_FragColor.rgb, vec3(0.94, 0.96, 1.0), max(minor * 0.22, major * 0.45));
+}`);
 }
 
 export class World3D {
   /** @param doc world document; opts.tileSize in metres (Infinity = one tile, best for a static viewer) */
-  constructor(doc, { anisotropy = 4, tileSize = Infinity, tickers = [] } = {}) {
+  constructor(doc, { anisotropy = 4, tileSize = Infinity, tickers = [], grid = false } = {}) {
     this.doc = doc;
     this.tileSize = tileSize;
     this.tickers = tickers;
@@ -178,6 +203,7 @@ export class World3D {
     this.rmats = new Map();                 // road material cache
     this.roadTiles = new Map();             // key -> {recs: Set(owner key), obj}
     this.roadTileOf = new Map();            // owner key -> tile key
+    this.gridOn = { value: grid ? 1 : 0 };  // uniform shared by every terrain material
   }
   get L() { return this.doc.layers; }
   get defs() { return this.doc.layers.defs; }
@@ -225,9 +251,12 @@ export class World3D {
 
   terrainMaterial() {
     const mat = new THREE.MeshLambertMaterial({ vertexColors: true });
-    if (this.L.roads) tunnelClip(mat, this.L.roads);
+    const grid = (sh) => groundGrid(sh, this.gridOn);
+    if (this.L.roads) tunnelClip(mat, this.L.roads, grid); else mat.onBeforeCompile = grid;
     return mat;
   }
+  /** Coordinate grid drawn on the ground (100 m lines, 500 m major lines). */
+  setGrid(on) { this.gridOn.value = on ? 1 : 0; }
 
   /** Re-read heights of grid cells [i0..i1]x[j0..j1] into the mesh (after a brush stroke). */
   updateTerrain(i0, j0, i1, j1, upload = true) {
@@ -440,14 +469,16 @@ export class World3D {
     t.obj = build.call(this, [...t.recs].filter((r) => !this.hidden.has(r)));
     this.groups[kind].add(t.obj);
   }
-  /** A record was changed/added/removed: re-tile it and rebuild the affected tiles. */
-  touch(kind, rec, removed = false) {
+  /** Move a changed/added/removed record to its tile; returns the tile keys that need a rebuild. */
+  retile(kind, rec, removed = false) {
     const old = this.tileOf.get(rec), tiles = this.tiles[kind];
     if (old !== undefined) { tiles.get(old)?.recs.delete(rec); this.tileOf.delete(rec); }
     const keys = new Set(old !== undefined ? [old] : []);
     if (!removed) keys.add(this.place(kind, rec));
-    for (const k of keys) this.buildTile(kind, k);
+    return keys;
   }
+  /** A record was changed/added/removed: re-tile it and rebuild the affected tiles. */
+  touch(kind, rec, removed = false) { for (const k of this.retile(kind, rec, removed)) this.buildTile(kind, k); }
 
   blockTile(recs) {
     const grp = new THREE.Group(), byMat = new Map();

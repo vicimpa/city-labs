@@ -38,7 +38,7 @@ const call = async (name, args = {}) => {
   return r;
 };
 const J = async (name, args) => JSON.parse((await call(name, args)).content[0].text);
-ok((await mcp.listTools()).tools.length === 18, 'HTTP MCP lists the tools');
+ok((await mcp.listTools()).tools.length === 21, 'HTTP MCP lists the tools');
 const info = await J('world_info');
 ok(info.app === true && info.file === file, 'world_info comes from the editor');
 
@@ -61,6 +61,16 @@ ok(await win.evaluate((id) => !!editor.world.roadWorld.bufs.get('e' + id)?.m.asp
 const u = await J('undo');
 ok(/дорога/.test(u.undone) && await win.evaluate((id) => !editor.doc.layers.roads.edges.some((e) => e.id === id), road.id), 'MCP undo removes the road');
 await J('redo');
+
+// a script is one undo step in the editor; the map renders from the editor's live document
+const undoBefore = await win.evaluate(() => editor.hist.done.length);
+const sr = await J('run_script', { code: "const t = world.find('building', (b) => b.type === 'tower'); for (const { rec } of t) world.move('building', rec, 0, 0, 5); return t.length;" });
+ok(sr.result > 100 && await win.evaluate(() => editor.hist.done.length) === undoBefore + 1, `MCP run_script: ${sr.result} towers lifted, one undo step`);
+await J('undo');
+const mp = await call('map', { center: [-60, -260], size_m: 400, width: 600, highlight: [{ kind: 'building', index: b.index }] });
+const mimg = mp.content.find((c) => c.type === 'image');
+ok(mimg && mimg.data.length > 10000, 'MCP map renders in the app');
+if (mimg) fs.writeFileSync(path.join(out, 'app_mcp_map.png'), Buffer.from(mimg.data, 'base64'));
 
 // the stdio server forwards to the app when it has the same file open
 const stdio = new Client({ name: 'e2e-stdio', version: '1' });

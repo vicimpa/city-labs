@@ -3,6 +3,8 @@
 //   inspector(el, rec, { kind, sugg(sub, field), edit(fn, label) })
 // edit(fn) must run fn(rec) inside an undoable command and re-render.
 
+import { t } from './i18n.js';
+
 const isRecord = (v) => v !== null && typeof v === 'object' && !Array.isArray(v) && !ArrayBuffer.isView(v);
 const isColor = (v) => typeof v === 'string' && /^#[0-9a-f]{6}$/i.test(v);
 const isVec = (v) => Array.isArray(v) && v.length >= 1 && v.length <= 4 && v.every((x) => typeof x === 'number');
@@ -33,15 +35,15 @@ function jsonBox(value, onSet) {
     try { onSet(JSON.parse(area.value)); area.classList.remove('bad'); } catch { area.classList.add('bad'); }
   });
   if (text.length <= 4000) return area;
-  const n = Array.isArray(value) ? `${value.length} эл.` : `${Object.keys(value).length} полей`;
-  const wrap = h('div', {}, h('button', { class: 'link', onclick: () => wrap.replaceWith(area) }, `${n}, ${(text.length / 1024).toFixed(0)} КБ — открыть JSON`));
+  const n = Array.isArray(value) ? t('insp.items', { n: value.length }) : t('insp.fields', { n: Object.keys(value).length });
+  const wrap = h('div', {}, h('button', { class: 'link', onclick: () => wrap.replaceWith(area) }, t('insp.openJson', { n, kb: (text.length / 1024).toFixed(0) })));
   return wrap;
 }
 
 function valueEditor(obj, key, ctx, sub) {
   const v = obj[key];
   const set = (nv, label = key) => ctx.edit(() => { obj[key] = nv; }, label);
-  if (ArrayBuffer.isView(v)) return h('span', { class: 'muted' }, `${v.constructor.name}(${v.length}) — только чтение`);
+  if (ArrayBuffer.isView(v)) return h('span', { class: 'muted' }, t('insp.readOnly', { type: v.constructor.name, n: v.length }));
   if (typeof v === 'boolean') return h('input', { type: 'checkbox', checked: v, onchange: (e) => set(e.target.checked) });
   if (typeof v === 'number') return numInput(v, set);
   if (isColor(v)) {
@@ -66,8 +68,8 @@ function recordList(obj, key, ctx) {
   arr.forEach((r, i) => {
     box.append(h('div', { class: 'subrec' },
       h('div', { class: 'subhead' }, `${key}[${i}]`,
-        h('button', { class: 'mini', title: 'Копия', onclick: () => ctx.edit(() => arr.splice(i + 1, 0, structuredClone(r)), `${key}: копия`) }, '⧉'),
-        h('button', { class: 'mini danger', title: 'Удалить', onclick: () => ctx.edit(() => arr.splice(i, 1), `${key}: удалить`) }, '×')),
+        h('button', { class: 'mini', title: t('common.copy'), onclick: () => ctx.edit(() => arr.splice(i + 1, 0, structuredClone(r)), t('insp.copyItem', { key })) }, '⧉'),
+        h('button', { class: 'mini danger', title: t('common.delete'), onclick: () => ctx.edit(() => arr.splice(i, 1), t('insp.deleteItem', { key })) }, '×')),
       fields(r, ctx, sub)));
   });
   return box;
@@ -79,17 +81,17 @@ function fields(obj, ctx, sub) {
     const v = obj[key], nested = Array.isArray(v) && v.length && v.every(isRecord);
     box.append(h('div', { class: nested ? 'field nested' : 'field' },
       h('label', { title: key }, key,
-        h('button', { class: 'mini ghost', title: 'Удалить поле', onclick: () => ctx.edit(() => { delete obj[key]; }, `удалить поле ${key}`) }, '×')),
+        h('button', { class: 'mini ghost', title: t('insp.deleteFieldTip'), onclick: () => ctx.edit(() => { delete obj[key]; }, t('insp.deleteField', { key })) }, '×')),
       valueEditor(obj, key, ctx, sub)));
   }
   // add a field of any name; the value is JSON (number, "text", [1,2], {...})
-  const name = h('input', { type: 'text', placeholder: 'новое поле', class: 'short' });
-  const val = h('input', { type: 'text', placeholder: 'значение (JSON)' });
+  const name = h('input', { type: 'text', placeholder: t('insp.newField'), class: 'short' });
+  const val = h('input', { type: 'text', placeholder: t('insp.value') });
   box.append(h('div', { class: 'field add' }, name, h('span', { class: 'row grow' }, val,
     h('button', { class: 'mini', onclick: () => {
       const k = name.value.trim(); if (!k) return;
       let v; try { v = JSON.parse(val.value); } catch { v = val.value; }
-      ctx.edit(() => { obj[k] = v; }, `поле ${k}`);
+      ctx.edit(() => { obj[k] = v; }, t('insp.field', { key: k }));
     } }, '+'))));
   return box;
 }
@@ -102,7 +104,7 @@ export function inspector(el, rec, ctx) {
       el.append(h('div', { class: 'fields' }, rec.map((x, i) => h('div', { class: 'field' }, h('label', {}, 'xyzw'[i] ?? i),
         numInput(x, (nv) => ctx.edit((r) => { r[i] = nv; }, 'xyzw'[i] ?? String(i)))))));
     } else {
-      el.append(h('div', { class: 'field' }, h('label', {}, 'точки'), jsonBox(rec, (nv) => ctx.edit((r) => { r.length = 0; r.push(...nv); }, 'точки'))));
+      el.append(h('div', { class: 'field' }, h('label', {}, t('insp.points')), jsonBox(rec, (nv) => ctx.edit((r) => { r.length = 0; r.push(...nv); }, t('insp.points')))));
     }
     return;
   }

@@ -26,6 +26,13 @@
   #top { position: fixed; top: 0; left: 0; right: 0; height: 38px; display: flex; gap: 6px; align-items: center; padding: 0 10px; background: var(--panel); border-bottom: 1px solid var(--line); z-index: 3; }
   #top b { margin-right: 8px; }
   #top .sep { width: 1px; height: 20px; background: var(--line); margin: 0 4px; }
+  /* desktop app without a system title bar: the top bar drags the window and hosts its buttons */
+  body.frameless #top { -webkit-app-region: drag; user-select: none; }
+  body.frameless #top button, body.frameless #top select, body.frameless #top input { -webkit-app-region: no-drag; }
+  body.frameless.mac #top { padding-left: 84px; }
+  body.frameless.winlike #top { padding-right: calc(100vw - env(titlebar-area-x, 0px) - env(titlebar-area-width, calc(100vw - 140px)) + 8px); }
+  #appmenu { display: none; font-size: 15px; line-height: 1; padding: 3px 8px; }
+  body.frameless.winlike #appmenu { display: inline-block; }
   #save { margin-left: auto; color: var(--muted); white-space: nowrap; }
   #save.dirty { color: var(--warn); }
   #update { background: #1f4d2b; border-color: #2f8a4a; white-space: nowrap; }
@@ -38,7 +45,7 @@
   #toolopts label { display: grid; grid-template-columns: 62px 1fr; align-items: center; gap: 4px; color: var(--muted); }
   #side { position: fixed; top: 48px; right: 10px; bottom: 40px; width: 340px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; display: flex; flex-direction: column; z-index: 2; }
   #tabs { display: flex; border-bottom: 1px solid var(--line); }
-  #tabs button { flex: 1; border: none; border-radius: 0; background: none; padding: 8px 0; color: var(--muted); }
+  #tabs button { flex: 1; border: none; border-radius: 0; background: none; padding: 8px 0; color: var(--muted); font-size: 11.5px; }
   #tabs button.on { color: var(--fg); box-shadow: inset 0 -2px var(--acc); }
   .pane { flex: 1; overflow: auto; padding: 10px; display: none; }
   .pane.on { display: block; }
@@ -72,54 +79,69 @@
   #coords { position: fixed; right: 360px; bottom: 40px; font: 11px ui-monospace, monospace; color: var(--muted); z-index: 2; }
   #busy { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; background: rgba(5,8,12,.6); z-index: 10; font-size: 14px; }
   #busy[hidden] { display: none; }
+  #pane-script textarea.code { min-height: 260px; font: 12px/1.45 ui-monospace, monospace; tab-size: 2; white-space: pre; }
+  #pane-gen .field { grid-template-columns: 130px 1fr; }
+  #pane-gen .help { color: var(--muted); margin: 6px 0 10px; line-height: 1.4; }
+  #pane-gen pre, #pane-script pre { background: #0f151c; border: 1px solid var(--line); border-radius: 5px; padding: 8px; font: 11px/1.4 ui-monospace, monospace; white-space: pre-wrap; word-break: break-word; max-height: 40vh; overflow: auto; margin: 8px 0 0; }
+  #pane-script pre.err { border-color: var(--bad); color: #ffb3b3; }
+  #pane-script details { margin-top: 10px; color: var(--muted); }
+  #pane-script details pre { color: var(--fg); }
   body.shot #top, body.shot #tools, body.shot #side, body.shot #hint, body.shot #coords { display: none; }
 </style>
 </head>
 <body>
 <div id="top">
+  <button id="appmenu" title="Меню" data-i18n-title="top.menu">☰</button>
   <b>City Labs</b>
-  <button id="open" title="Открыть .vspb с диска">Открыть…</button>
-  <button id="download" title="Скачать текущий мир как .vspb">Скачать .vspb</button>
-  <button id="writeProject" title="Записать в city/data/vespera.vspb (только dev-сервер)" hidden>Записать в проект</button>
-  <button id="reset" class="danger" title="Выбросить правки из браузера и загрузить файл проекта">Сбросить</button>
+  <button id="new" title="Новая пустая карта" data-i18n-title="top.newTip" data-i18n="top.new">Новая</button>
+  <button id="open" title="Открыть .vspb с диска" data-i18n-title="top.openTip" data-i18n="common.open">Открыть…</button>
+  <button id="sample" title="Открыть город-пример Vespera Bay" data-i18n-title="top.sampleTip" data-i18n="top.sample">Пример</button>
+  <button id="download" title="Скачать текущий мир как .vspb" data-i18n-title="top.downloadTip" data-i18n="top.download">Скачать .vspb</button>
+  <button id="writeProject" title="Записать в city/data/vespera.vspb (только dev-сервер)" data-i18n-title="top.writeProjectTip" hidden data-i18n="top.writeProject">Записать в проект</button>
+  <button id="reset" hidden data-i18n="top.reload">Перечитать</button>
   <span class="sep"></span>
-  <button id="undo" title="Отменить (Ctrl+Z)">↶</button>
-  <button id="redo" title="Повторить (Ctrl+Shift+Z)">↷</button>
+  <button id="undo" title="Отменить (Ctrl+Z)" data-i18n-title="hist.undoTip">↶</button>
+  <button id="redo" title="Повторить (Ctrl+Shift+Z)" data-i18n-title="hist.redoTip">↷</button>
   <span class="sep"></span>
   <span id="source" class="muted"></span>
   <span id="save">—</span>
   <button id="update" class="update" hidden></button>
+  <select id="lang" title="Язык / Language" style="padding:2px 4px"></select>
   <input id="file" type="file" accept=".vspb" hidden>
 </div>
 <div id="tools">
   <div class="grid">
-    <button data-tool="select">Выбор <kbd>1</kbd></button>
-    <button data-tool="road">Дорога <kbd>2</kbd></button>
-    <button data-tool="building">Здание <kbd>3</kbd></button>
-    <button data-tool="surface">Площадка <kbd>4</kbd></button>
-    <button data-tool="furniture">Объект <kbd>5</kbd></button>
-    <button data-tool="tree">Дерево <kbd>6</kbd></button>
-    <button data-tool="wind">Ветряк <kbd>7</kbd></button>
-    <button data-tool="rail">Ж/д путь <kbd>8</kbd></button>
-    <button data-tool="terrain">Рельеф <kbd>9</kbd></button>
+    <button data-tool="select"><span data-i18n="tool.select">Выбор</span> <kbd>1</kbd></button>
+    <button data-tool="road"><span data-i18n="kind.edge">Дорога</span> <kbd>2</kbd></button>
+    <button data-tool="building"><span data-i18n="kind.building">Здание</span> <kbd>3</kbd></button>
+    <button data-tool="surface"><span data-i18n="kind.surface">Площадка</span> <kbd>4</kbd></button>
+    <button data-tool="furniture"><span data-i18n="kind.furniture">Объект</span> <kbd>5</kbd></button>
+    <button data-tool="tree"><span data-i18n="kind.tree">Дерево</span> <kbd>6</kbd></button>
+    <button data-tool="wind"><span data-i18n="kind.wind">Ветряк</span> <kbd>7</kbd></button>
+    <button data-tool="rail"><span data-i18n="kind.rail">Ж/д путь</span> <kbd>8</kbd></button>
+    <button data-tool="terrain"><span data-i18n="common.terrain">Рельеф</span> <kbd>9</kbd></button>
   </div>
   <div id="toolopts"></div>
 </div>
 <div id="side">
   <div id="tabs">
-    <button data-tab="props" class="on">Свойства</button>
-    <button data-tab="defs">Типы</button>
-    <button data-tab="find">Поиск</button>
-    <button data-tab="layers">Слои</button>
+    <button data-tab="props" class="on" data-i18n="tab.props">Свойства</button>
+    <button data-tab="defs" data-i18n="tab.defs">Типы</button>
+    <button data-tab="find" data-i18n="tab.find">Поиск</button>
+    <button data-tab="layers" data-i18n="tab.layers">Слои</button>
+    <button data-tab="gen" data-i18n="tab.gen">Генераторы</button>
+    <button data-tab="script" data-i18n="tab.script">Скрипт</button>
   </div>
   <div id="pane-props" class="pane on"></div>
   <div id="pane-defs" class="pane"></div>
   <div id="pane-find" class="pane"></div>
   <div id="pane-layers" class="pane"></div>
+  <div id="pane-gen" class="pane"></div>
+  <div id="pane-script" class="pane"></div>
 </div>
 <div id="coords"></div>
 <div id="hint"></div>
-<div id="busy">загрузка…</div>
+<div id="busy" data-i18n="common.loading">загрузка…</div>
 <script type="module" src="./main.js"></script>
 </body>
 </html>

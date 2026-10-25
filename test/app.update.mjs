@@ -11,6 +11,7 @@ import { _electron as electron } from 'playwright';
 import { createPackage } from '@electron/asar';
 
 const root = path.resolve(import.meta.dirname, '..');
+const SHELL = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')).cityLabs.shell;
 const exe = { darwin: `release/mac-${process.arch}/City Labs.app/Contents/MacOS/City Labs`, linux: 'release/linux-unpacked/city-labs', win32: 'release/win-unpacked/City Labs.exe' }[process.platform];
 if (!fs.existsSync(path.join(root, exe))) { console.error(`no packaged app at ${exe}: run npm run dist first`); process.exit(2); }
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'citylabs-upd-')), feed = path.join(tmp, 'feed');
@@ -58,24 +59,24 @@ async function editorWindow(app) {
 
 // 1) code update on start
 const a1 = await bundle('0.1.1');
-manifest({ version: '0.1.1', shell: 1, asar: a1 });
+manifest({ version: '0.1.1', shell: SHELL, asar: a1 });
 const ud = path.join(tmp, 'ud1');
 let app = await launch(ud);
 let win = await editorWindow(app);
 const info = await win.evaluate(() => window.vspbHost.info());
-ok(info.version === '0.1.1' && info.shell === 1, `newer bundle downloaded and started (${info.version}, shell ${info.shell})`);
+ok(info.version === '0.1.1' && info.shell === SHELL, `newer bundle downloaded and started (${info.version}, shell ${info.shell})`);
 ok(fs.existsSync(path.join(ud, 'updates/app-0.1.1.asar')), 'bundle stored in userData/updates');
 
 // 3) background check: a newer bundle appears while running
 const a2 = await bundle('0.1.2');
-manifest({ version: '0.1.2', shell: 1, asar: a2 });
+manifest({ version: '0.1.2', shell: SHELL, asar: a2 });
 await win.evaluate(() => window.vspbHost.update('check'));
 await win.waitForFunction(() => /0\.1\.2 — перезапустить/.test(document.getElementById('update').textContent), null, { timeout: 60000 })
   .then(() => ok(true, 'background check downloads 0.1.2 and offers a restart'), () => ok(false, 'background check downloads 0.1.2 and offers a restart'));
 await app.close();
 
 // 2) a new shell: offered on the splash, then in the editor after «Позже»
-manifest({ version: '0.2.0', shell: 2, asar: a2, installers: {} });
+manifest({ version: '0.2.0', shell: SHELL + 1, asar: a2, installers: {} });
 app = await launch(ud);
 let splash = null;
 for (let k = 0; k < 100 && !splash; k++) { splash = app.windows().find((x) => x.url().endsWith('splash.html')); if (!splash) await new Promise((r) => setTimeout(r, 100)); }

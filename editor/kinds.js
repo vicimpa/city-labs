@@ -2,6 +2,7 @@
 // `rebuild` names the World3D part to redraw: 'blocks' / 'surfaces' are tiled (per-record rebuild),
 // the rest are rebuilt whole.
 import { edgesAt, followEnd } from './roadedit.js';
+import { t } from './i18n.js';
 
 const bbox2 = (pts) => {
   let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
@@ -20,8 +21,8 @@ const roundPts = (pts) => { for (const p of pts) { p[0] = r2(p[0]); p[1] = r2(p[
 const polyKind = (o) => ({ ...o, closed: true });
 export const KINDS = {
   building: {
-    label: 'Здание', layer: 'buildings', rebuild: 'blocks', list: (L) => L.buildings.items,
-    title: (r) => `${r.type ?? '?'} · ${r.zone ?? ''} · ${r.parts?.length ?? 0} ч.`,
+    get label() { return t('kind.building'); }, layer: 'buildings', rebuild: 'blocks', list: (L) => L.buildings.items,
+    title: (r) => `${r.type ?? '?'} · ${r.zone ?? ''} · ` + t('kind.building.parts', { n: r.parts?.length ?? 0 }),
     center(r) {
       const all = (r.parts ?? []).flatMap((p) => p.p ?? []);
       const [x, y] = mid(all.length ? all : [[0, 0]]);
@@ -34,8 +35,8 @@ export const KINDS = {
     search: (r) => `${r.type} ${r.zone}`,
   },
   surface: polyKind({
-    label: 'Площадка', layer: 'buildings', rebuild: 'surfaces', list: (L) => L.buildings.surfaces,
-    title: (r) => `${r.m ?? '?'} · ${r.p?.length ?? 0} верш.`,
+    get label() { return t('kind.surface'); }, layer: 'buildings', rebuild: 'surfaces', list: (L) => L.buildings.surfaces,
+    title: (r) => `${r.m ?? '?'} · ` + t('kind.surface.vertices', { n: r.p?.length ?? 0 }),
     center: (r) => [...mid(r.p), null],
     move(r, dx, dy) { movePts(r.p, dx, dy); for (const h of r.holes ?? []) movePts(h, dx, dy); },
     rotate(r, a, cx, cy) { for (const q of r.p) rot(q, a, cx, cy); roundPts(r.p); for (const h of r.holes ?? []) { for (const q of h) rot(q, a, cx, cy); roundPts(h); } },
@@ -43,7 +44,7 @@ export const KINDS = {
     search: (r) => `surface ${r.m}`,
   }),
   furniture: {
-    label: 'Объект', layer: 'furniture', rebuild: 'furniture', list: (L) => L.furniture.items,
+    get label() { return t('kind.furniture'); }, layer: 'furniture', rebuild: 'furniture', list: (L) => L.furniture.items,
     title: (r) => `${r.t ?? '?'}`,
     center: (r) => [r.p[0], r.p[1], r.p[2]],
     move(r, dx, dy, dz) { r.p = [r2(r.p[0] + dx), r2(r.p[1] + dy), r2(r.p[2] + dz)]; },
@@ -51,29 +52,29 @@ export const KINDS = {
     search: (r) => `furniture ${r.t}`,
   },
   tree: {
-    label: 'Дерево', layer: 'buildings', rebuild: 'trees', list: (L) => L.buildings.trees,
-    title: () => 'дерево', center: (r) => [r[0], r[1], r[2]],
+    get label() { return t('kind.tree'); }, layer: 'buildings', rebuild: 'trees', list: (L) => L.buildings.trees,
+    title: () => t('kind.tree.title'), center: (r) => [r[0], r[1], r[2]],
     move(r, dx, dy, dz) { r[0] = r2(r[0] + dx); r[1] = r2(r[1] + dy); r[2] = r2(r[2] + dz); },
   },
   wind: {
-    label: 'Ветряк', layer: 'buildings', rebuild: 'wind', list: (L) => L.buildings.wind,
-    title: () => 'ветряк', center: (r) => [r[0], r[1], r[2]],
+    get label() { return t('kind.wind'); }, layer: 'buildings', rebuild: 'wind', list: (L) => L.buildings.wind,
+    title: () => t('kind.wind.title'), center: (r) => [r[0], r[1], r[2]],
     move(r, dx, dy, dz) { r[0] = r2(r[0] + dx); r[1] = r2(r[1] + dy); r[2] = r2(r[2] + dz); },
   },
   rail: {
-    label: 'Ж/д путь', layer: 'buildings', rebuild: 'rails', list: (L) => L.buildings.rails,
-    title: (r) => `ж/д путь · ${r.length} т.`, center: (r) => [...mid(r), null],
+    get label() { return t('kind.rail'); }, layer: 'buildings', rebuild: 'rails', list: (L) => L.buildings.rails,
+    title: (r) => t('kind.rail.title', { n: r.length }), center: (r) => [...mid(r), null],
     move(r, dx, dy, dz) { movePts(r, dx, dy, dz); },
     rings: (r) => [{ pts: r, closed: false, z: (i) => r[i][2] }],
   },
   train: {
-    label: 'Маршрут поезда', layer: 'buildings', rebuild: 'trains', list: (L) => L.buildings.trains,
-    title: (r) => `поезд · ${r.closed ? 'кольцо' : 'челнок'} · ${r.pts.length} т.`, center: (r) => [...mid(r.pts), null],
+    get label() { return t('kind.train'); }, layer: 'buildings', rebuild: 'trains', list: (L) => L.buildings.trains,
+    title: (r) => t(r.closed ? 'kind.train.loop' : 'kind.train.shuttle', { n: r.pts.length }), center: (r) => [...mid(r.pts), null],
     move(r, dx, dy, dz) { movePts(r.pts, dx, dy, dz); },
     rings: (r) => [{ pts: r.pts, closed: !!r.closed, z: (i) => r.pts[i][2] }],
   },
   edge: {
-    label: 'Дорога', layer: 'roads', rebuild: 'roads', list: (L) => L.roads.edges,
+    get label() { return t('kind.edge'); }, layer: 'roads', rebuild: 'roads', list: (L) => L.roads.edges,
     title: (r) => `${r.name ?? ''} · ${r.cls} · #${r.id}`, center: (r) => [...mid(r.pts), null],
     // the whole road moves with its end nodes; other roads at those nodes bend to follow
     move(r, dx, dy, dz, L) {
@@ -92,8 +93,8 @@ export const KINDS = {
     search: (r) => `road ${r.name} ${r.cls} #${r.id}`,
   },
   node: {
-    label: 'Узел дорог', layer: 'roads', rebuild: 'roads', list: (L) => L.roads.nodes,
-    title: (r) => `узел ${r.kind} #${r.id}`, center: (r) => [...r.p],
+    get label() { return t('kind.node'); }, layer: 'roads', rebuild: 'roads', list: (L) => L.roads.nodes,
+    title: (r) => t('kind.node.title', { kind: r.kind, id: r.id }), center: (r) => [...r.p],
     move(r, dx, dy, dz, L) {
       r.p = [r2(r.p[0] + dx), r2(r.p[1] + dy), r2(r.p[2] + dz)];
       for (const e of edgesAt(L.roads, r.id)) {

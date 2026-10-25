@@ -17,8 +17,9 @@
     "test:app": "node test/app.e2e.mjs",
     "build:app": "node tools/build-app.mjs --asar",
     "dist": "node tools/build-app.mjs --asar && electron-builder",
-    "test": "npm run test:vspb && npm run test:mcp && npm run test:roads",
-    "test:update": "node test/app.update.mjs"
+    "test": "node test/i18n.check.mjs && npm run test:vspb && npm run test:mcp && npm run test:roads",
+    "test:update": "node test/app.update.mjs",
+    "build:web": "node tools/build-web.mjs"
   },
   "dependencies": {
     "@dimforge/rapier3d-compat": "^0.21.0",
@@ -41,7 +42,7 @@
   "productName": "City Labs",
   "description": "City Labs — редактор города: дороги, рельеф, здания и типы в одном файле .vspb, с MCP для ИИ-агентов",
   "cityLabs": {
-    "shell": 1,
+    "shell": 2,
     "repo": "vicimpa/city-labs"
   },
   "repository": {

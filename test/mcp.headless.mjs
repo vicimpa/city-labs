@@ -20,7 +20,7 @@ const call = async (name, args = {}) => {
   return JSON.parse(r.content[0].text);
 };
 const tools = (await client.listTools()).tools.map((t) => t.name);
-ok(tools.length === 18 && tools.includes('road_add'), `tools listed: ${tools.join(', ')}`);
+ok(tools.length === 21 && tools.includes('map') && tools.includes('run_script') && tools.includes('generate'), `tools listed: ${tools.join(', ')}`);
 const info = await call('world_info');
 ok(info.counts.building > 4000 && info.counts.edge === 220, `world_info: ${JSON.stringify(info.counts)}`);
 ok((await call('list_types')).materials.includes('brick'), 'list_types');
@@ -47,6 +47,21 @@ const te = await call('terrain_edit', { x: 3000, y: 3000, radius: 60, mode: 'rai
 ok(te.natural_at_centre - hs.natural !== 0, `terrain_edit raise: ${JSON.stringify(te)}`);
 await call('def_set', { group: 'materials', name: 'mcp_red', value: { color: '#ff0000', shininess: 5 } });
 ok((await call('list_types', { group: 'materials' })).mcp_red?.color === '#ff0000', 'def_set');
+const map = await client.callTool({ name: 'map', arguments: { center: [100, -300], size_m: 800, width: 512, highlight: [{ kind: 'building', index: b.index }] } });
+const legend = JSON.parse(map.content.find((c) => c.type === 'text').text);
+ok(!map.isError && map.content[0].type === 'image' && map.content[0].data.length > 20000 && legend.width === 512 && legend.roads.length > 3, `map renders an image with ${legend.roads.length} numbered roads`);
+const run = await call('run_script', { code: `
+  const t = world.find('building', (b) => b.zone === 'downtown');
+  for (const { rec } of t) world.edit('building', rec, (x) => { x.note2 = 'bulk'; });
+  world.log('n', t.length);
+  return { n: t.length, roads: world.list('edge').length };` });
+ok(run.result.n > 100 && run.edits === run.result.n && run.logs[0].startsWith('n '), `run_script edits ${run.result.n} buildings in ${run.ms} ms`);
+const bad = await client.callTool({ name: 'run_script', arguments: { code: 'world.log("before"); throw new Error("boom")' } });
+ok(bad.isError && /boom/.test(bad.content[0].text) && /before/.test(bad.content[0].text), 'run_script reports errors with its log');
+const gen = await call('generate', { id: 'streets', params: { cx: 3200, cy: 1200, width: 400, height: 300, block: 150 } });
+ok(gen.result.roads >= 5 && gen.edits === gen.result.roads, `generate streets: ${gen.result.roads} roads in ${gen.ms} ms`);
+const genB = await call('generate', { id: 'buildings', params: { cx: 3200, cy: 1200, radius: 300, zone: 'suburb' } });
+ok(genB.result.buildings > 0, `generate buildings: ${genB.result.buildings}`);
 const shot = await client.callTool({ name: 'screenshot', arguments: {} });
 ok(shot.isError && /app/.test(shot.content[0].text), 'screenshot headless explains it needs the app');
 await call('delete', { kind: 'furniture', index: lamp.index });
@@ -56,6 +71,7 @@ await client.close();
 const doc = await decode(fs.readFileSync(file));
 const e = doc.layers.roads.edges.find((x) => x.id === road.id);
 ok(e?.name === 'MCP Test Road' && doc.layers.buildings.items[b.index].note === 'by mcp' && doc.layers.defs.materials.mcp_red, 'saved file has the road, the building note and the material');
+ok(doc.layers.buildings.items.filter((x) => x.note2 === 'bulk').length === run.result.n, 'saved file has the script\'s bulk edit');
 ok(doc.layers.furniture.items.some((f) => f.owner === 'e' + road.id), 'the new road placed its delineators');
 fs.rmSync(dir, { recursive: true });
 console.log(fails ? `${fails} FAILED` : 'all MCP headless checks passed');

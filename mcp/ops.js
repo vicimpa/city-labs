@@ -8,6 +8,10 @@
 //   app only: view(args), select(kind, rec), undo(), redo()
 // Tool schemas are functions of zod so this module itself needs no dependency.
 import { addRoad, reprofile, deleteEdge, deleteNode } from '../editor/roadedit.js';
+import { renderMap, encodePng, MAP_LAYERS } from './map.js';
+import { t } from '../editor/i18n.js';
+import { runScript, SCRIPT_API } from './script.js';
+import { runGenerator, describeGenerators } from './generators.js';
 
 const KIND_DOC = `Record kinds and their shape:
 - building: {type, zone, parts:[{p:[[x,y],...] outline, holes?, z base height, h height, m material}]} (no id, addressed by index)
@@ -64,9 +68,9 @@ export const TOOLS = [
     description: 'Overview of the open world: file, unsaved state, record counts per kind, map extent, registry sizes. Start here.\n\n' + KIND_DOC,
     schema: () => ({}),
     run(s) {
-      const L = s.doc.layers, t = L.terrain;
+      const L = s.doc.layers, ter = L.terrain;
       return { ...s.info(), counts: Object.fromEntries(KINDS_ENUM.map((k) => [k, list(s, k).length])),
-        terrain: t && { x0: t.x0, y0: t.y0, x1: t.x0 + (t.nx - 1) * t.res, y1: t.y0 + (t.ny - 1) * t.res, res: t.res },
+        terrain: ter && { x0: ter.x0, y0: ter.y0, x1: ter.x0 + (ter.nx - 1) * ter.res, y1: ter.y0 + (ter.ny - 1) * ter.res, res: ter.res },
         registry: Object.fromEntries(Object.entries(L.defs ?? {}).filter(([, v]) => v && typeof v === 'object').map(([k, v]) => [k, Object.keys(v).length])),
         roadClasses: Object.keys(L.roads?.classes ?? {}) };
     },
@@ -124,7 +128,7 @@ export const TOOLS = [
         if (a.value !== undefined) { if (!Array.isArray(r)) throw new Error('value replaces array records only; use set'); r.length = 0; r.push(...a.value); }
         if (a.set) { if (Array.isArray(r)) throw new Error('this kind is an array record; use value'); Object.assign(r, structuredClone(a.set)); }
         for (const k of a.unset ?? []) delete r[k];
-      }, `MCP: изменить ${s.kinds[a.kind].label}`);
+      }, t('mcp.edit', { what: s.kinds[a.kind].label }));
       return summary(s, a.kind, rec, list(s, a.kind).indexOf(rec));
     },
   },
@@ -136,7 +140,7 @@ export const TOOLS = [
       if (kind === 'building' && !(record?.parts?.length)) throw new Error('a building needs parts: [{p, z, h, m}]');
       if ((kind === 'surface') && !(record?.p?.length >= 3)) throw new Error('a surface needs an outline p of 3+ points');
       const rec = structuredClone(record);
-      s.insert(kind, rec, `MCP: ${s.kinds[kind].label}`);
+      s.insert(kind, rec, t('mcp.create', { what: s.kinds[kind].label }));
       return summary(s, kind, rec, list(s, kind).indexOf(rec));
     },
   },
@@ -146,9 +150,9 @@ export const TOOLS = [
     schema: (z) => ref(z),
     run(s, a) {
       const rec = resolve(s, a);
-      if (a.kind === 'edge') s.roadTx(deleteEdge(s.doc, rec), 'MCP: удалить дорогу');
-      else if (a.kind === 'node') s.roadTx(deleteNode(s.doc, rec), 'MCP: удалить узел');
-      else s.remove(a.kind, rec, `MCP: удалить ${s.kinds[a.kind].label}`);
+      if (a.kind === 'edge') s.roadTx(deleteEdge(s.doc, rec), t('mcp.deleteRoad'));
+      else if (a.kind === 'node') s.roadTx(deleteNode(s.doc, rec), t('mcp.deleteNode'));
+      else s.remove(a.kind, rec, t('mcp.delete', { what: s.kinds[a.kind].label }));
       return { deleted: true };
     },
   },
@@ -162,7 +166,7 @@ export const TOOLS = [
         if (a.dx || a.dy || a.dz) K.move(r, a.dx ?? 0, a.dy ?? 0, a.dz ?? 0, s.doc.layers);
         if (a.rotate_deg) { if (!K.rotate) throw new Error(`${a.kind} cannot rotate`); const [cx, cy] = K.center(r); K.rotate(r, (a.rotate_deg * Math.PI) / 180, cx, cy); }
         if (a.ground && ['building', 'furniture', 'tree', 'wind'].includes(a.kind)) { const [x, y, z] = K.center(r); K.move(r, 0, 0, Math.max(s.graded(x, y), 0) - z, s.doc.layers); }
-      }, `MCP: переместить ${K.label}`);
+      }, t('mcp.move', { what: K.label }));
       return summary(s, a.kind, rec, list(s, a.kind).indexOf(rec));
     },
   },
@@ -174,7 +178,7 @@ export const TOOLS = [
       if (!s.doc.layers.roads?.classes?.[cls]) throw new Error(`unknown road class '${cls}'`);
       const res = addRoad(s.doc, s.natural, points, cls, name ?? '');
       if (!res) throw new Error('could not lay the road (too short, or both ends on one node)');
-      s.roadTx(res.tx, 'MCP: новая дорога');
+      s.roadTx(res.tx, t('mcp.newRoad'));
       const e = res.edge;
       return { id: e.id, name: e.name, nodes: e.n, points: e.pts.length, length_m: Math.round((e.pts.length - 1) * 4) };
     },
@@ -185,7 +189,7 @@ export const TOOLS = [
     schema: (z) => ({ id: z.number().int() }),
     run(s, { id }) {
       const rec = resolve(s, { kind: 'edge', id });
-      s.edit('edge', rec, (r) => reprofile(s.doc, s.natural, r), 'MCP: профиль дороги');
+      s.edit('edge', rec, (r) => reprofile(s.doc, s.natural, r), t('mcp.profile'));
       return { id, z: [rec.pts[0][2], rec.pts[rec.pts.length - 1][2]], bridges: rec.elev.filter(Boolean).length, tunnel: rec.tunnel.filter(Boolean).length };
     },
   },
@@ -202,23 +206,23 @@ export const TOOLS = [
     description: 'Shape the natural ground in a circle (smooth falloff): raise / lower by `amount` metres at the centre, flatten towards `height` (default: the centre\'s height) with strength amount 0..1, or smooth with `amount` passes. Roads keep their cuts and embankments.',
     schema: (z) => ({ x: z.number(), y: z.number(), radius: z.number().positive(), mode: z.enum(['raise', 'lower', 'flatten', 'smooth']), amount: z.number(), height: z.number().optional() }),
     run(s, { x, y, radius, mode, amount, height }) {
-      const t = s.doc.layers.terrain;
-      if (!t) throw new Error('no terrain');
-      const rc = radius / t.res, ci = (x - t.x0) / t.res, cj = (y - t.y0) / t.res;
-      const box = [Math.max(1, Math.floor(ci - rc)), Math.max(1, Math.floor(cj - rc)), Math.min(t.nx - 2, Math.ceil(ci + rc)), Math.min(t.ny - 2, Math.ceil(cj + rc))];
+      const ter = s.doc.layers.terrain;
+      if (!ter) throw new Error('no terrain');
+      const rc = radius / ter.res, ci = (x - ter.x0) / ter.res, cj = (y - ter.y0) / ter.res;
+      const box = [Math.max(1, Math.floor(ci - rc)), Math.max(1, Math.floor(cj - rc)), Math.min(ter.nx - 2, Math.ceil(ci + rc)), Math.min(ter.ny - 2, Math.ceil(cj + rc))];
       const target = height ?? s.natural(x, y);
       s.terrain(box, (h) => {
         const passes = mode === 'smooth' ? Math.max(1, Math.round(amount)) : 1;
         for (let p = 0; p < passes; p++) for (let j = box[1]; j <= box[3]; j++) for (let i = box[0]; i <= box[2]; i++) {
           const d = Math.hypot(i - ci, j - cj) / rc;
           if (d >= 1) continue;
-          const w = (1 - d * d) ** 2, k = j * t.nx + i;
+          const w = (1 - d * d) ** 2, k = j * ter.nx + i;
           if (mode === 'raise') h[k] += amount * w;
           else if (mode === 'lower') h[k] -= amount * w;
           else if (mode === 'flatten') h[k] += (target - h[k]) * Math.min(1, amount) * w;
-          else h[k] += ((h[k - 1] + h[k + 1] + h[k - t.nx] + h[k + t.nx]) / 4 - h[k]) * w;
+          else h[k] += ((h[k - 1] + h[k + 1] + h[k - ter.nx] + h[k + ter.nx]) / 4 - h[k]) * w;
         }
-      }, `MCP: рельеф ${mode}`);
+      }, t('mcp.terrain', { mode }));
       return { box, natural_at_centre: round(s.natural(x, y)), graded_at_centre: round(s.graded(x, y)) };
     },
   },
@@ -227,6 +231,41 @@ export const TOOLS = [
     description: 'Create or replace a type registry entry (value object), or delete it (value null). Groups: materials {color "#rrggbb", shininess, specular, glow, nightGlow, facade wall|curtain|brick|ribs|""}, buildingTypes {wall office|house|""}, zones {color}, surfaces {color, lift}, furniture {parts:[{k box|cyl|ico|cone, s:[w,d,h] | r, h, at:[x,y,z], c "#rrggbb"}]}, roadMaterials {color}, roadClasses {color}, roads.classes {lanes, lane_w, shoulder, median, side, corner, prio, r, sigma, max_grade, k_min, oneway}.',
     schema: (z) => ({ group: z.string(), name: z.string(), value: z.any().nullable() }),
     run(s, { group, name, value }) { s.setDef(group, name, value === null ? null : structuredClone(value)); return { group, name, deleted: value === null }; },
+  },
+  {
+    name: 'map', title: 'Map of an area',
+    description: 'Top-down map image of an area, rendered from the data (no app needed): shaded terrain, water, ground patches, roads (dark edge = bridge, dashed = tunnel), junctions, buildings coloured by material, rails, trees, a coordinate grid labelled in metres and numbered markers on the longest visible roads. Give center [x,y] + size_m (default 2000) or bbox [x0,y0,x1,y1]; with neither, the whole map. The text part maps marker numbers to road ids/names and gives the scale. Use it to look around, find places and check edits.',
+    schema: (z) => ({
+      center: z.array(z.number()).length(2).optional(), size_m: z.number().positive().optional(),
+      bbox: z.array(z.number()).length(4).optional(), width: z.number().int().min(128).max(2048).optional().describe('pixels, default 1024'),
+      layers: z.array(z.enum(MAP_LAYERS)).optional().describe('default: all but furniture'),
+      highlight: z.array(z.object(ref(z))).optional().describe('records to outline in magenta'),
+    }),
+    async run(s, a) {
+      let bbox = a.bbox;
+      const ter = s.doc.layers.terrain;
+      if (!bbox && !a.center && ter) bbox = [ter.x0, ter.y0, ter.x0 + (ter.nx - 1) * ter.res, ter.y0 + (ter.ny - 1) * ter.res];   // the whole map
+      if (!bbox) { const c = a.center ?? [0, 0], half = (a.size_m ?? 2000) / 2; bbox = [c[0] - half, c[1] - half, c[0] + half, c[1] + half]; }
+      if (!(bbox[2] > bbox[0] && bbox[3] > bbox[1])) throw new Error('bbox must be [x0, y0, x1, y1] with x1 > x0, y1 > y0');
+      const highlight = (a.highlight ?? []).map((r) => ({ kind: r.kind, rec: resolve(s, r) }));
+      const m = renderMap(s.doc, { bbox, width: a.width ?? 1024, layers: a.layers, highlight, graded: s.graded, kinds: s.kinds });
+      return { image: await encodePng(m.rgba, m.width, m.height), text: JSON.stringify(m.legend) };
+    },
+  },
+  {
+    name: 'run_script', title: 'Run a script on the world',
+    description: 'Run JavaScript against the world for queries over many records and bulk edits. `code` is the body of an async function (world, args); return a JSON-serialisable value. All edits of one run are one undo step, and derived geometry is rebuilt once at the end.\n\n' + SCRIPT_API,
+    schema: (z) => ({ code: z.string(), args: z.any().optional(), label: z.string().optional().describe('undo label') }),
+    async run(s, a) {
+      const r = await runScript(s, a.code, a.args, a.label ?? t('mcp.script'), (ss, t) => TOOL_BY_NAME.terrain_edit.run(ss, t));
+      return { ...r, result: r.result === undefined ? null : JSON.parse(r.result.endsWith('(cut at 200 KB)') ? JSON.stringify(r.result) : r.result) };
+    },
+  },
+  {
+    name: 'generate', title: 'Run a generator',
+    description: 'Run a standard generator with parameters; the whole result is one undo step. Omitted parameters take their defaults; cx/cy are the centre of the area in metres. Generators:\n' + describeGenerators(),
+    schema: (z) => ({ id: z.enum(['terrain', 'streets', 'buildings', 'trees']), params: z.record(z.string(), z.any()).optional() }),
+    async run(s, a) { return runGenerator(s, a.id, a.params ?? {}, t('gen.undo', { name: t(`gen.${a.id}`) })); },
   },
   {
     name: 'save', title: 'Save the world file',

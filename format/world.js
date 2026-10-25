@@ -105,6 +105,30 @@ export const DEFAULT_DEFS = {
   },
 };
 
+// road classes of a new world (lanes per direction; widths in metres; grades as fractions)
+export const DEFAULT_ROAD_CLASSES = {"avenue":{"lanes":2,"lane_w":3.4,"shoulder":2.4,"median":0.6,"side":4.5,"sigma":60,"r":60,"prio":3,"corner":9,"oneway":false,"max_grade":0.08,"k_min":22},"boulevard":{"lanes":3,"lane_w":3.5,"shoulder":0.6,"median":7,"side":5,"sigma":80,"r":200,"prio":4,"corner":12,"oneway":false,"max_grade":0.07,"k_min":25},"fw12":{"lanes":2,"lane_w":3.6,"shoulder":1.8,"median":0,"side":0,"sigma":90,"r":300,"prio":6,"corner":12,"oneway":true,"max_grade":0.06,"k_min":60},"fw13":{"lanes":3,"lane_w":3.6,"shoulder":1.8,"median":0,"side":0,"sigma":90,"r":300,"prio":6,"corner":12,"oneway":true,"max_grade":0.06,"k_min":60},"industrial":{"lanes":1,"lane_w":4.2,"shoulder":1.6,"median":0.3,"side":0,"sigma":50,"r":40,"prio":2,"corner":12,"oneway":false,"max_grade":0.07,"k_min":15},"lane":{"lanes":1,"lane_w":3.1,"shoulder":0.4,"median":0,"side":2.2,"sigma":25,"r":15,"prio":1,"corner":5,"oneway":false,"max_grade":0.12,"k_min":6},"mountain":{"lanes":1,"lane_w":3.6,"shoulder":1,"median":0.3,"side":0,"sigma":22,"r":30,"prio":2,"corner":8,"oneway":false,"max_grade":0.115,"k_min":6},"raceway":{"lanes":1,"lane_w":6,"shoulder":2,"median":0,"side":0,"sigma":40,"r":40,"prio":3,"corner":12,"oneway":false,"max_grade":0.06,"k_min":15},"ramp1":{"lanes":1,"lane_w":3.8,"shoulder":0.6,"median":0,"side":0,"sigma":30,"r":60,"prio":5,"corner":10,"oneway":true,"max_grade":0.07,"k_min":18},"runway":{"lanes":1,"lane_w":22,"shoulder":0,"median":0,"side":0,"sigma":200,"r":500,"prio":3,"corner":12,"oneway":false,"max_grade":0.01,"k_min":100},"rural":{"lanes":1,"lane_w":3.6,"shoulder":1.4,"median":0.3,"side":0,"sigma":30,"r":60,"prio":2,"corner":10,"oneway":false,"max_grade":0.1,"k_min":15},"street":{"lanes":1,"lane_w":3.6,"shoulder":2.3,"median":0.3,"side":3.5,"sigma":45,"r":30,"prio":2,"corner":7,"oneway":false,"max_grade":0.1,"k_min":12}};
+
+/** A new, empty world: flat land of size × size metres at `height`, no roads or buildings, the default registry. */
+export function emptyWorld({ size = 4000, res = 4, height = 10 } = {}) {
+  const n = Math.round(size / res) + 1, half = ((n - 1) * res) / 2;
+  const classes = structuredClone(DEFAULT_ROAD_CLASSES);
+  for (const c of Object.values(classes)) {
+    const hw = c.oneway ? (c.lanes * c.lane_w) / 2 + c.shoulder : c.lanes * c.lane_w + c.shoulder + c.median / 2;
+    c.hw = Math.round(hw * 100) / 100; c.hwt = Math.round((hw + c.side) * 100) / 100;
+  }
+  return withDefaults({
+    meta: { created: new Date().toISOString(), generator: 'city-labs' },
+    layers: {
+      terrain: { layer: 'terrain', x0: -half, y0: -half, res, nx: n, ny: n, sea_level: 0,
+        base: new Float32Array(n * n).fill(height), h: new Float32Array(n * n).fill(height), bore: new Uint32Array(0) },
+      roads: { layer: 'roads', classes, nodes: [], edges: [] },
+      furniture: { layer: 'furniture', items: [] },
+      buildings: { layer: 'buildings', items: [], surfaces: [], trees: [], rails: [], cables: [], wind: [], trains: [] },
+    },
+    schema: { hints: { ...HINTS }, kinds: { ...KINDS } },
+  });
+}
+
 /** Fill registry entries the document lacks (old files, new built-in types); never overwrites. */
 export function withDefaults(doc) {
   // natural ground the roads are graded into; files from before it existed start from the graded one

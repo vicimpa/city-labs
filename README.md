@@ -7,6 +7,9 @@ asphalt, markings, junctions, pier bents, street lamps and the graded ground aro
 on the spot. An AI agent can edit the same city over MCP: its edits appear live in the editor and
 can be undone.
 
+**Try it in the browser: [vicimpa.github.io/city-labs](https://vicimpa.github.io/city-labs/)**, or
+install the desktop app (below).
+
 ![The City Labs editor](docs/img/editor.jpg)
 
 ## What it can do
@@ -24,9 +27,18 @@ can be undone.
   classes live in the file's registry. A new type needs no code.
 - **One file.** The `.vspb` format is binary, extensible and backward compatible (spec:
   [docs/VSPB.md](docs/VSPB.md)). The world is about 9 MB, and the derived geometry is rebuilt on load.
-- **MCP for agents.** 18 tools: search, read and write records, lay roads, edit the terrain and the
-  registry, save, and take screenshots of the 3D view
-  ([docs/APP.md](docs/APP.md)).
+- **MCP for agents.** 21 tools: search, read and write records, lay roads, edit the terrain and the
+  registry, top-down maps of any area, generators, JavaScript scripts for bulk operations, save, and screenshots
+  of the 3D view ([docs/APP.md](docs/APP.md)).
+- **Generators.** Built-in generators take parameters: hilly terrain or an island, a street grid
+  (block size, rotation, bend, avenues), buildings along streets by zone preset (downtown,
+  midtown, residential, suburb, industrial), and tree patches. A whole run is one Ctrl+Z.
+- **Scripts.** The Script tab runs JS over the world, with one undo step per run.
+- **Start from an empty map.** A new map is 4 × 4 km of flat land with the full type registry.
+  Vespera Bay opens with the **Sample** button.
+- **Navigation.** Fly the camera with WASD (Shift is faster); the wheel zooms.
+- **Russian and English UI.** The app window has no system title bar: its buttons sit in the
+  editor's top bar.
 
 ![A selected road with junctions](docs/img/roads.jpg)
 
@@ -44,7 +56,9 @@ Download the installer for your system from the
 The macOS builds are not signed by Apple. On the first launch, right-click the app and choose
 **Open**, or run `xattr -dr com.apple.quarantine "/Applications/City Labs.app"`.
 
-The app opens the Vespera Bay sample city. **File → Open / Save / Save As** work on any `.vspb`.
+The app starts with a new empty map; **File → Open the sample** opens Vespera Bay. **File → New /
+Open / Save / Save As** work on any `.vspb`. After installing, double-click a `.vspb` file (or use
+Open With) to open it in City Labs: the installers register the file type.
 
 ### Updates
 
@@ -75,6 +89,7 @@ If a downloaded version fails to start, the app falls back to the version built 
 npm install
 npm run app          # the desktop app from source (Vite dev server inside)
 npm run edit         # the editor in a browser (working copy in IndexedDB)
+npm run build:web    # the web editor for GitHub Pages → dist-web/
 npm run view         # the city viewer with a drivable car and 100 test cars
 npm test             # format, MCP and the road builder
 npm run test:app     # the desktop app end to end (Playwright Electron)
@@ -100,6 +115,8 @@ Bump the version, then push the tag:
 npm version patch          # or minor / major
 git push --follow-tags
 ```
+
+Every push to `main` also publishes the web editor to GitHub Pages (the **Pages** workflow).
 
 The **Release** workflow builds the installers for macOS, Windows and Linux, and the code bundle
 `app-<version>.asar`. It publishes them to GitHub Releases with `manifest.json`, which installed

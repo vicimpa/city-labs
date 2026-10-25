@@ -15,8 +15,39 @@ const SHELL = pkg.cityLabs.shell, REPO = pkg.cityLabs.repo;
 const FEED = process.env.CITY_LABS_UPDATE_URL;   // test feed: a folder URL holding manifest.json + assets
 const CHECK_EVERY = 30 * 60 * 1000;
 
+// the shell's own strings; the language is the editor's choice (state.json) or the system's
+const TEXT = {
+  en: {
+    checking: 'Checking for updates…', newShell: 'Version {v} is out. It needs a fresh install.', downloading: 'Downloading {v}…',
+    updating: 'Downloading update {v}…', starting: 'Starting {v}…', version: 'version {v}', download: 'Download', later: 'Later',
+    dlFailed: 'Could not download the update', startFailed: 'City Labs failed to start', checkFailed: 'Could not check for updates',
+    latest: 'You have the latest City Labs ({v})', downloaded: 'City Labs {v} downloaded',
+    macInstall: 'Drag City Labs into Applications, replacing the old one, and start it again.', file: 'File: {path}',
+  },
+  ru: {
+    checking: 'Проверка обновлений…', newShell: 'Вышла новая версия {v}. Её нужно установить заново.', downloading: 'Скачивание {v}…',
+    updating: 'Загрузка обновления {v}…', starting: 'Запуск {v}…', version: 'версия {v}', download: 'Скачать', later: 'Позже',
+    dlFailed: 'Не удалось скачать обновление', startFailed: 'City Labs не запустился', checkFailed: 'Не удалось проверить обновления',
+    latest: 'У вас последняя версия City Labs ({v})', downloaded: 'City Labs {v} скачан',
+    macInstall: 'Перетащите City Labs в «Программы» с заменой и запустите заново.', file: 'Файл: {path}',
+  },
+};
+const lang = () => {
+  const s = readJson(path.join(app.getPath('userData'), 'state.json'), {}).lang;
+  return TEXT[s] ? s : app.getLocale().toLowerCase().startsWith('ru') ? 'ru' : 'en';
+};
+const T = (k, p = {}) => TEXT[lang()][k].replace(/\{(\w+)\}/g, (m, x) => p[x] ?? m);
+
 protocol.registerSchemesAsPrivileged([{ scheme: 'app', privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true } }]);
 if (!app.requestSingleInstanceLock()) app.quit();
+process.env.CITY_LABS_SHELL = String(SHELL);
+
+// files handed over by the system (double-click, Open With, the dock): kept until the bundle runs,
+// then passed to it; later ones (and a second launch with a file) go straight to the editor
+let pendingFile = null, bundleMain = null;
+const vspbArg = (argv) => { const a = argv.slice(1).find((x) => x.toLowerCase().endsWith('.vspb') && !x.startsWith('-')); return a && path.resolve(a); };
+app.on('open-file', (e, f) => { e.preventDefault(); if (bundleMain?.openRequest) bundleMain.openRequest(f); else pendingFile = f; });
+app.on('second-instance', (_e, argv) => { const f = vspbArg(argv); if (f) bundleMain?.openRequest?.(f); });
 
 // ---------------------------------------------------------------- bundles
 const updatesDir = () => path.join(app.getPath('userData'), 'updates');
@@ -77,7 +108,7 @@ class Updater {
   async check(manual = false, { timeout = 15000 } = {}) {
     let m;
     try { m = await withTimeout(this.manifestNow(), timeout); } catch (e) {
-      if (manual) dialog.showMessageBox({ type: 'warning', message: 'Не удалось проверить обновления', detail: String(e.message ?? e) });
+      if (manual) dialog.showMessageBox({ type: 'warning', message: T('checkFailed'), detail: String(e.message ?? e) });
       return this.state;
     }
     const current = this.running ?? pick().version;
@@ -88,7 +119,7 @@ class Updater {
       if (!have && this.running) this.downloadAsar().catch((e) => console.error('update download failed:', e));
     } else {
       this.set({ kind: 'none' });
-      if (manual) dialog.showMessageBox({ type: 'info', message: `У вас последняя версия City Labs (${current})` });
+      if (manual) dialog.showMessageBox({ type: 'info', message: T('latest', { v: current }) });
     }
     return this.state;
   }
@@ -117,8 +148,8 @@ class Updater {
     if (process.platform === 'win32') { await shell.openPath(dst); app.quit(); return; }
     shell.showItemInFolder(dst);
     if (process.platform === 'darwin') await shell.openPath(dst);
-    dialog.showMessageBox({ type: 'info', message: `City Labs ${m.version} скачан`,
-      detail: process.platform === 'darwin' ? 'Перетащите City Labs в «Программы» с заменой и запустите заново.' : `Файл: ${dst}` });
+    dialog.showMessageBox({ type: 'info', message: T('downloaded', { v: m.version }),
+      detail: process.platform === 'darwin' ? T('macInstall') : T('file', { path: dst }) });
   }
 }
 
@@ -129,39 +160,44 @@ function splashWindow() {
   w.loadFile(path.join(__dirname, 'splash.html'));
   w.once('ready-to-show', () => w.show());
   const ready = new Promise((r) => w.webContents.once('did-finish-load', r));
-  w.say = async (st) => { await ready; if (!w.isDestroyed()) w.webContents.executeJavaScript(`window.show(${JSON.stringify(st)})`).catch(() => {}); };
+  w.say = async (st) => {
+    await ready;
+    const labels = { download: T('download'), later: T('later'), version: st.version && T('version', { v: st.version }) };
+    if (!w.isDestroyed()) w.webContents.executeJavaScript(`window.show(${JSON.stringify({ ...st, labels })})`).catch(() => {});
+  };
   w.choice = () => new Promise((r) => ipcMain.once('splash:choice', (_e, c) => r(c)));
   return w;
 }
 
 app.whenReady().then(async () => {
   const splash = splashWindow(), updater = new Updater();
-  splash.say({ text: 'Проверка обновлений…', version: pick().version });
+  splash.say({ text: T('checking'), version: pick().version });
   const st = await updater.check(false, { timeout: 6000 });
   if (st.kind === 'shell') {
-    splash.say({ text: `Вышла новая версия ${st.version}. Её нужно установить заново.`, offer: true });
+    splash.say({ text: T('newShell', { v: st.version }), offer: true });
     if ((await splash.choice()) === 'download') {
-      splash.say({ text: `Скачивание ${st.version}…`, progress: 0 });
-      try { await updater.downloadShell((p) => splash.say({ text: `Скачивание ${st.version}…`, progress: p })); }
-      catch (e) { dialog.showErrorBox('Не удалось скачать обновление', String(e.message ?? e)); }
+      splash.say({ text: T('downloading', { v: st.version }), progress: 0 });
+      try { await updater.downloadShell((p) => splash.say({ text: T('downloading', { v: st.version }), progress: p })); }
+      catch (e) { dialog.showErrorBox(T('dlFailed'), String(e.message ?? e)); }
       if (process.platform !== 'linux') { app.quit(); return; }
     }
   } else if (st.kind === 'asar' && !st.ready) {
-    try { await updater.downloadAsar((p) => splash.say({ text: `Загрузка обновления ${st.version}…`, progress: p })); }
+    try { await updater.downloadAsar((p) => splash.say({ text: T('updating', { v: st.version }), progress: p })); }
     catch (e) { console.error(e); }
   }
   // start the newest compatible bundle; a downloaded one that fails is set aside and the built-in runs
   let b = pick();
   for (;;) {
-    splash.say({ text: `Запуск ${b.version}…`, progress: null });
+    splash.say({ text: T('starting', { v: b.version }), progress: null });
     try {
       const main = require(path.join(b.dir, 'main.cjs'));
       updater.running = b.version;
-      await main.start({ mode: 'prod', bundleDir: b.dir, version: b.version, shell: SHELL, updater });
+      await main.start({ mode: 'prod', bundleDir: b.dir, version: b.version, shell: SHELL, updater, openFile: pendingFile ?? vspbArg(process.argv) });
+      bundleMain = main;
       break;
     } catch (e) {
       console.error(`bundle ${b.version} failed:`, e);
-      if (b.builtin) { dialog.showErrorBox('City Labs не запустился', String(e.stack ?? e)); app.quit(); return; }
+      if (b.builtin) { dialog.showErrorBox(T('startFailed'), String(e.stack ?? e)); app.quit(); return; }
       const badFile = path.join(updatesDir(), 'bad.json');
       fs.writeFileSync(badFile, JSON.stringify([...readJson(badFile, []), b.version]));
       app.relaunch(); app.exit(0); return;
