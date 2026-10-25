@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#3fb6ff"/>
+      <stop offset=".55" stop-color="#1f4d7a"/>
+      <stop offset="1" stop-color="#0f2236"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="14" fill="url(#bg)"/>
+  <!-- skyline -->
+  <rect x="11" y="29" width="8" height="19" rx="1" fill="#cfe6ff"/>
+  <rect x="21" y="15" width="9" height="33" rx="1" fill="#f2f8ff"/>
+  <rect x="32" y="23" width="8" height="25" rx="1" fill="#dcecfb"/>
+  <rect x="42" y="33" width="10" height="15" rx="1" fill="#b6d6f5"/>
+  <g fill="#1f4d7a" opacity=".55">
+    <rect x="24" y="19" width="3" height="3"/><rect x="24" y="25" width="3" height="3"/><rect x="24" y="31" width="3" height="3"/><rect x="24" y="37" width="3" height="3"/>
+    <rect x="35" y="27" width="2.5" height="3"/><rect x="35" y="33" width="2.5" height="3"/><rect x="35" y="39" width="2.5" height="3"/>
+    <rect x="14" y="33" width="2.5" height="3"/><rect x="14" y="39" width="2.5" height="3"/>
+  </g>
+  <!-- road -->
+  <rect x="7" y="50" width="50" height="6" rx="3" fill="#1b2430"/>
+  <rect x="13" y="52.4" width="8" height="1.2" rx=".6" fill="#f2b705"/>
+  <rect x="28" y="52.4" width="8" height="1.2" rx=".6" fill="#f2b705"/>
+  <rect x="43" y="52.4" width="8" height="1.2" rx=".6" fill="#f2b705"/>
+</svg>

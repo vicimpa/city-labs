@@ -87,6 +87,15 @@ ipcMain.handle('file:save', async (_e, bytes) => {
   return { path: file };
 });
 ipcMain.handle('file:saveAs', (_e, bytes) => saveAs(bytes));
+// exports go wherever the user picks (not the world file)
+ipcMain.handle('file:export', async (_e, name, bytes) => {
+  const ext = path.extname(name).slice(1);
+  const r = await dialog.showSaveDialog(win, { defaultPath: path.join(file ? path.dirname(file) : app.getPath('documents'), name),
+    filters: [{ name: ext.toUpperCase(), extensions: [ext] }] });
+  if (r.canceled || !r.filePath) return null;
+  fs.writeFileSync(r.filePath, Buffer.from(bytes));
+  return { path: r.filePath };
+});
 async function saveAs(bytes) {
   const r = await dialog.showSaveDialog(win, { filters: fileFilter, defaultPath: file ?? path.join(app.getPath('documents'), 'city.vspb') });
   if (r.canceled || !r.filePath) return null;
@@ -182,6 +191,7 @@ function buildMenu() {
       { label: t('file.reloadFromDisk'), click: send('reload') },
       { type: 'separator' },
       { label: t('menu.openSample'), click: send('sample') },
+      { label: t('menu.export'), accelerator: 'CmdOrCtrl+E', click: send('export') },
       { label: t(process.platform === 'darwin' ? 'menu.showInFinder' : 'menu.showInFolder'), click: () => file && shell.showItemInFolder(file) },
       ...(mac ? [] : [{ type: 'separator' }, { role: 'quit' }]),
     ] },

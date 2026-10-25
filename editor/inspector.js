@@ -4,6 +4,7 @@
 // edit(fn) must run fn(rec) inside an undoable command and re-render.
 
 import { t } from './i18n.js';
+import { fieldMeta } from './fields.js';
 
 const isRecord = (v) => v !== null && typeof v === 'object' && !Array.isArray(v) && !ArrayBuffer.isView(v);
 const isColor = (v) => typeof v === 'string' && /^#[0-9a-f]{6}$/i.test(v);
@@ -40,16 +41,43 @@ function jsonBox(value, onSet) {
   return wrap;
 }
 
+// a short description of a long array, with the JSON a click away
+const isPts = (v) => Array.isArray(v) && v.length > 0 && v.every((q) => Array.isArray(q) && q.length >= 2 && q.every((x) => typeof x === 'number'));
+function describe(key, v) {
+  if (isPts(v)) {
+    let len = 0, area = 0;
+    for (let i = 1; i < v.length; i++) len += Math.hypot(v[i][0] - v[i - 1][0], v[i][1] - v[i - 1][1]);
+    for (let i = 0; i < v.length; i++) { const a = v[i], b = v[(i + 1) % v.length]; area += a[0] * b[1] - b[0] * a[1]; }
+    const n = t('insp.points.n', { n: v.length });
+    if (key === 'p' && v.length >= 3 && v[0].length === 2) return `${n} · ${t('insp.area', { a: Math.round(Math.abs(area) / 2) })}`;
+    return `${n} · ${t('insp.length', { l: Math.round(len) })}`;
+  }
+  if (Array.isArray(v) && v.length && v.every(isPts)) return t('insp.rings', { n: v.length });
+  if (Array.isArray(v) && v.length > 4 && v.every((x) => x === 0 || x === 1)) return t('insp.flags', { k: v.filter(Boolean).length, n: v.length });
+  return null;
+}
+function summary(text, value, set) {
+  const wrap = h('div', { class: 'row' }, h('span', { class: 'muted' }, text),
+    h('button', { class: 'link', onclick: () => wrap.replaceWith(jsonBox(value, set)) }, 'JSON'));
+  return wrap;
+}
+
 function valueEditor(obj, key, ctx, sub) {
-  const v = obj[key];
-  const set = (nv, label = key) => ctx.edit(() => { obj[key] = nv; }, label);
+  const v = obj[key], meta = fieldMeta(sub, key);
+  const set = (nv, label = meta.label) => ctx.edit(() => { obj[key] = nv; }, label);
   if (ArrayBuffer.isView(v)) return h('span', { class: 'muted' }, t('insp.readOnly', { type: v.constructor.name, n: v.length }));
+  if (meta.readonly) return h('span', { class: 'muted ro' }, Array.isArray(v) ? v.join(', ') : String(v));
   if (typeof v === 'boolean') return h('input', { type: 'checkbox', checked: v, onchange: (e) => set(e.target.checked) });
+  if (typeof v === 'number' && meta.toView) return h('span', { class: 'row grow' }, numInput(meta.toView(v), (x) => set(meta.fromView(x))), h('span', { class: 'muted' }, meta.unit));
   if (typeof v === 'number') return numInput(v, set);
   if (isColor(v)) {
     return h('span', { class: 'row' },
       h('input', { type: 'color', value: v, onchange: (e) => set(e.target.value) }),
       h('input', { type: 'text', value: v, class: 'short', onchange: (e) => set(e.target.value) }));
+  }
+  if (typeof v === 'string' && meta.select && ctx.sugg?.(sub, key)) {
+    const list = ctx.sugg(sub, key), opts = list.includes(v) ? list : [v, ...list];
+    return h('select', { onchange: (e) => set(e.target.value) }, opts.map((o) => h('option', { value: o, selected: o === v }, o === '' ? '—' : o)));
   }
   if (typeof v === 'string') {
     const list = ctx.sugg?.(sub, key), id = list ? 'dl' + uid++ : undefined;
@@ -58,16 +86,17 @@ function valueEditor(obj, key, ctx, sub) {
       list ? h('datalist', { id }, list.map((o) => h('option', { value: o }))) : null);
   }
   if (isVec(v)) return h('span', { class: 'row vec' }, v.map((x, i) => numInput(x, (nx) => { const c = [...v]; c[i] = nx; set(c); }, 'xyzw'[i])));
-  if (Array.isArray(v) && v.length && v.every(isRecord)) return recordList(obj, key, ctx);
-  return jsonBox(v, set);
+  if (Array.isArray(v) && v.length && v.every(isRecord)) return recordList(obj, key, ctx, meta.label);
+  const d = describe(key, v);
+  return d ? summary(d, v, set) : jsonBox(v, set);
 }
 
-function recordList(obj, key, ctx) {
+function recordList(obj, key, ctx, label = key) {
   const arr = obj[key], sub = ctx.subKind?.(key) ?? key;
   const box = h('div', { class: 'sublist' });
   arr.forEach((r, i) => {
     box.append(h('div', { class: 'subrec' },
-      h('div', { class: 'subhead' }, `${key}[${i}]`,
+      h('div', { class: 'subhead', title: `${key}[${i}]` }, `${label} · ${i + 1}`,
         h('button', { class: 'mini', title: t('common.copy'), onclick: () => ctx.edit(() => arr.splice(i + 1, 0, structuredClone(r)), t('insp.copyItem', { key })) }, '⧉'),
         h('button', { class: 'mini danger', title: t('common.delete'), onclick: () => ctx.edit(() => arr.splice(i, 1), t('insp.deleteItem', { key })) }, '×')),
       fields(r, ctx, sub)));
@@ -78,9 +107,9 @@ function recordList(obj, key, ctx) {
 function fields(obj, ctx, sub) {
   const box = h('div', { class: 'fields' });
   for (const key of Object.keys(obj)) {
-    const v = obj[key], nested = Array.isArray(v) && v.length && v.every(isRecord);
+    const v = obj[key], nested = Array.isArray(v) && v.length && v.every(isRecord), meta = fieldMeta(sub, key);
     box.append(h('div', { class: nested ? 'field nested' : 'field' },
-      h('label', { title: key }, key,
+      h('label', { title: key }, meta.label,
         h('button', { class: 'mini ghost', title: t('insp.deleteFieldTip'), onclick: () => ctx.edit(() => { delete obj[key]; }, t('insp.deleteField', { key })) }, '×')),
       valueEditor(obj, key, ctx, sub)));
   }

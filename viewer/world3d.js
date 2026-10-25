@@ -188,7 +188,8 @@ export class World3D {
     this.doc = doc;
     this.tileSize = tileSize;
     this.tickers = tickers;
-    this.facades = facadeTextures(anisotropy);
+    this.anisotropy = anisotropy;
+    this.facades = facadeTextures(doc.layers.defs?.facades, anisotropy);
     this.hidden = new Set();                // records left out of the merged meshes (being edited live)
     this.night = false;
     this.mats = new Map();                  // building material cache  'm|facade' -> material
@@ -434,6 +435,8 @@ export class World3D {
     if (mat.flatShading !== !tx) { mat.flatShading = !tx; }
     mat.needsUpdate = true;
   }
+  /** Regenerate the facade textures from defs.facades (in place, so materials keep them). */
+  refreshFacades() { facadeTextures(this.defs.facades, this.anisotropy, this.facades); for (const mat of this.mats.values()) this.styleMaterial(mat); }
   /** Re-apply defs (colours, glow, surface colours) to every live material. */
   refreshMaterials() {
     for (const mat of this.mats.values()) this.styleMaterial(mat);

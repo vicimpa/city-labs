@@ -3,7 +3,7 @@
 import * as THREE from 'three';
 import { MapControls } from 'three/examples/jsm/controls/MapControls.js';
 import { World3D } from '../viewer/world3d.js';
-import { decodeWorld, encodeWorldLayer, assemble, emptyWorld, LAYERS } from '../format/world.js';
+import { decodeWorld, encodeWorldLayer, assemble, emptyWorld, gridStep, LAYERS } from '../format/world.js';
 import { loadWorking, saveWorking, dropWorking } from './store.js';
 import { History, clone } from './history.js';
 import { KINDS, suggestions } from './kinds.js';
@@ -16,6 +16,8 @@ import { runTool, TOOL_BY_NAME } from '../mcp/ops.js';
 import { runScript, SCRIPT_API } from '../mcp/script.js';
 import { GENERATORS, GENERATOR_BY_ID, runGenerator } from '../mcp/generators.js';
 import { inspector, h } from './inspector.js';
+import { facadeCanvases } from '../viewer/facades.js';
+import { exportGlb, exportPng, exportJson } from './export.js';
 import { t, getLang, setLang, onLang, applyDom, LANGS } from './i18n.js';
 
 const SRC = '/city/data/vespera.vspb', TILE = 600;
@@ -70,8 +72,9 @@ function sourceLabel() {
   return t(source.kind === 'sample' ? 'file.sample' : 'file.untitled');
 }
 function renderSource() {
-  $('source').textContent = sourceLabel();
   const name = sourceLabel().split(/[\\/]/).pop();
+  $('source').textContent = name;
+  $('source').title = sourceLabel();
   document.title = `${unsaved ? '● ' : ''}${name} — City Labs`;
   host?.setTitle(document.title);
 }
@@ -222,12 +225,105 @@ async function replaceWorld(load, src) {
     return true;
   } catch (e) { alert(t('file.openFailed', { e: e.message })); return false; } finally { busy(''); }
 }
-const newWorld = () => replaceWorld(async () => { host?.newFile(); return emptyWorld(); }, { kind: 'new' });
+// a small modal form: fields [{ name, label, type: 'select' | 'number' | 'bool', options: [[value, label]], value }]
+// fields may react to changes (onInput(vals, set)); `info(vals)` is a line of text kept up to date
+function modal(title, fields, okLabel, { info } = {}) {
+  return new Promise((resolve) => {
+    const vals = Object.fromEntries(fields.map((f) => [f.name, f.value])), inputs = {};
+    const close = (v) => { back.remove(); resolve(v); };
+    const note = h('div', { class: 'muted', style: 'margin-top:8px' });
+    const changed = (f) => { f.onInput?.(vals, set); if (info) note.textContent = info(vals); };
+    const set = (name, v) => { vals[name] = v; const el = inputs[name]; if (el) { if (el.type === 'checkbox') el.checked = !!v; else el.value = v; } };
+    const form = h('div', { class: 'fields' }, fields.map((f) => {
+      const el = inputs[f.name] = f.type === 'select' ? h('select', { onchange: (e) => { vals[f.name] = e.target.value; changed(f); } }, f.options.map(([v, l]) => h('option', { value: v, selected: String(v) === String(f.value) }, l)))
+        : f.type === 'bool' ? h('input', { type: 'checkbox', checked: !!f.value, onchange: (e) => { vals[f.name] = e.target.checked; changed(f); } })
+          : h('input', { type: 'number', step: f.step ?? 'any', min: f.min, max: f.max, value: f.value, oninput: (e) => { vals[f.name] = +e.target.value; changed(f); } });
+      return h('div', { class: 'field' }, h('label', {}, f.label), el);
+    }));
+    if (info) note.textContent = info(vals);
+    const back = h('div', { class: 'modal-back', onclick: (e) => { if (e.target === back) close(null); } },
+      h('div', { class: 'modal' }, h('div', { class: 'hdr' }, title), form, note,
+        h('div', { class: 'actions', style: 'justify-content:flex-end' },
+          h('button', { onclick: () => close(null) }, t('dialog.cancel')), h('button', { class: 'primary', onclick: () => close(vals) }, okLabel))));
+    back.addEventListener('keydown', (e) => { if (e.key === 'Escape') close(null); if (e.key === 'Enter') close(vals); });
+    document.body.append(back);
+    back.querySelector('select, input')?.focus();
+  });
+}
+// presets in km: squares from a district to a region, and a few long strips (a coast, a valley, a highway)
+const PRESETS = [[0.5, 0.5], [1, 1], [2, 2], [3, 3], [4, 4], [6, 6], [8, 8], [10, 10], [12, 12], [16, 16], [2, 1], [4, 2], [8, 4], [12, 3], [16, 4]];
+async function newWorld() {
+  if (hasWork() && !confirm(t('file.replaceWorkConfirm'))) return;
+  const v = await modal(t('newMap.title'), [
+    { name: 'preset', label: t('newMap.preset'), type: 'select', value: '4x4',
+      options: [...PRESETS.map(([w, d]) => [`${w}x${d}`, t('newMap.kmWD', { w, d })]), ['custom', t('newMap.custom')]],
+      onInput: (vals, set) => { if (vals.preset !== 'custom') { const [w, d] = vals.preset.split('x').map(Number); set('width', w); set('depth', d); } } },
+    { name: 'width', label: t('newMap.width'), type: 'number', value: 4, min: 0.25, max: 64, step: 0.25, onInput: (vals, set) => set('preset', 'custom') },
+    { name: 'depth', label: t('newMap.depth'), type: 'number', value: 4, min: 0.25, max: 64, step: 0.25, onInput: (vals, set) => set('preset', 'custom') },
+    { name: 'res', label: t('newMap.res'), type: 'select', value: 'auto', options: [['auto', t('newMap.resAuto')], ...[1, 2, 4, 6, 8, 12, 16].map((r) => [r, t('newMap.resM', { r })])] },
+    { name: 'height', label: t('newMap.height'), type: 'number', value: 10 },
+    { name: 'relief', label: t('newMap.relief'), type: 'bool', value: false },
+  ], t('newMap.create'), {
+    info: (vals) => {
+      const w = Math.max(250, (+vals.width || 1) * 1000), d = Math.max(250, (+vals.depth || 1) * 1000), r = gridStep(w, d, vals.res);
+      const cells = (Math.round(w / r) + 1) * (Math.round(d / r) + 1);
+      return t('newMap.info', { r, cells: (cells / 1e6).toFixed(2) });
+    },
+  });
+  if (!v) return;
+  const width = Math.max(250, (+v.width || 4) * 1000), depth = Math.max(250, (+v.depth || 4) * 1000), size = Math.max(width, depth);
+  host?.newFile();
+  if (!host) await dropWorking().catch(() => {});
+  setDoc(emptyWorld({ width, depth, res: v.res, ground: +v.height || 0 }), {}, { kind: 'new' });
+  setSaveState('clean');
+  if (v.relief) {
+    await runGenerator(mcpSession, 'terrain', { island: true, base: +v.height || 10, amplitude: size / 100, wavelength: size / 4 }, t('gen.undo', { name: t('gen.terrain') }));
+    hist.done.length = 0; updateUndo();            // the relief is part of the new map, not an edit to undo
+    setSaveState('clean');
+  }
+}
 async function openSample() {
   if (host) { const f = await host.openSample(); return f && replaceWorld(() => decodeWorld(f.bytes), { kind: 'file', path: f.path }); }
   return replaceWorld(async () => decodeWorld(await (await fetch(SAMPLE)).arrayBuffer()), { kind: 'sample' });
 }
 $('new').onclick = () => newWorld();
+// export for other tools: browser downloads, the app asks where to save
+async function exportWorld() {
+  const v = await modal(t('export.title'), [
+    { name: 'format', label: t('export.format'), type: 'select', value: 'glb', options: [['glb', t('export.glb')], ['png', t('export.png')], ['json', t('export.json')]] },
+    { name: 'terrain', label: t('export.terrain'), type: 'select', value: '2', options: [['1', t('export.terrainFull')], ['2', t('export.terrainHalf')], ['4', t('export.terrainQuarter')], ['0', t('export.terrainNone')]] },
+    { name: 'roads', label: t('export.roads'), type: 'bool', value: true },
+    { name: 'buildings', label: t('export.buildings'), type: 'bool', value: true },
+    { name: 'furniture', label: t('export.furniture'), type: 'bool', value: true },
+    { name: 'trees', label: t('export.trees'), type: 'bool', value: true },
+    { name: 'width', label: t('export.width'), type: 'select', value: '4096', options: ['1024', '2048', '4096', '8192'].map((w) => [w, `${w} px`]) },
+  ], t('export.run'), { info: (vals) => t(`export.note.${vals.format}`) });
+  if (!v) return;
+  busy(t('export.busy'));
+  await new Promise((r) => setTimeout(r, 30));
+  try {
+    const base = (sourcePath() ?? (source.kind === 'sample' ? 'vespera' : 'city')).split(/[\\/]/).pop().replace(/\.vspb$/i, '');
+    const bytes = v.format === 'glb' ? await exportGlb(world, { terrainStep: +v.terrain, roads: v.roads, buildings: v.buildings, furniture: v.furniture, trees: v.trees })
+      : v.format === 'png' ? await exportPng(doc, (x, y) => world.H?.(x, y) ?? 0, KINDS, +v.width) : exportJson(doc);
+    const name = `${base}.${v.format}`;
+    if (host) { const r = await host.exportFile(name, bytes); if (r) hint(t('export.saved', { path: r.path, mb: (bytes.length / 1e6).toFixed(1) })); }
+    else {
+      const a = h('a', { href: URL.createObjectURL(new Blob([bytes])), download: name });
+      document.body.append(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+      hint(t('export.saved', { path: name, mb: (bytes.length / 1e6).toFixed(1) }));
+    }
+  } catch (e) { console.error(e); alert(t('export.failed', { e: e.message })); } finally { busy(''); }
+}
+$('export').onclick = () => exportWorld();
+// the File menu: items close it; shortcuts are shown where the app actually binds them
+$('quicksave').onclick = () => $('download').onclick();
+$('filemenu').onclick = (e) => { e.stopPropagation(); $('filelist').hidden = !$('filelist').hidden; };
+$('filelist').addEventListener('click', () => { $('filelist').hidden = true; });
+addEventListener('pointerdown', (e) => { if (!e.target.closest?.('#filewrap')) $('filelist').hidden = true; });
+for (const k of document.querySelectorAll('#filelist kbd')) {
+  const mac = /Mac/.test(navigator.platform), key = k.dataset.k;
+  k.textContent = !host ? '' : mac ? `${key.startsWith('⇧') ? '⇧' : ''}⌘${key.replace('⇧', '')}` : `Ctrl+${key.startsWith('⇧') ? 'Shift+' : ''}${key.replace('⇧', '')}`;
+}
 $('sample').onclick = () => openSample();
 $('download').onclick = async () => {
   busy(t('file.building'));
@@ -278,9 +374,8 @@ if (host) {
   $('appmenu').onclick = (e) => { const r = e.currentTarget.getBoundingClientRect(); host.menu(r.left, r.bottom); };
   $('top').addEventListener('dblclick', (e) => { if (e.target === $('top') || e.target.id === 'source' || e.target.tagName === 'B') host.zoom(); });
   // the top bar becomes New / Open / Sample / Save / Save as / Reload; downloads and the dev-server write-back are browser things
-  for (const [id, text, title] of [['download', 'common.save', 'top.saveTip'], ['writeProject', 'common.saveAs', 'top.saveAsTip'], ['reset', 'top.reload', 'top.reloadTip']]) {
-    $(id).dataset.i18n = text; $(id).dataset.i18nTitle = title;
-  }
+  for (const [id, text] of [['download', 'common.save'], ['writeProject', 'common.saveAs'], ['quicksave', 'common.save']]) $(id).querySelector('span').dataset.i18n = text;
+  $('quicksave').dataset.i18nTitle = 'top.saveTip';
   $('download').onclick = () => saveNow();
   $('writeProject').hidden = false;
   $('writeProject').onclick = () => saveNow({ as: true });
@@ -294,6 +389,7 @@ if (host) {
     else if (what === 'save') saveNow();
     else if (what === 'saveAs') saveNow({ as: true });
     else if (what === 'reload') $('reset').onclick();
+    else if (what === 'export') exportWorld();
   });
   // a .vspb opened from the system (double-click, Open With, drag onto the dock icon)
   host.on('file:open-request', async ({ path }) => {
@@ -360,6 +456,13 @@ const mcpSession = {
   },
   async save() { if (!(await saveNow())) throw new Error('not saved (busy or the save dialog was cancelled)'); return { file: sourcePath() ?? sourceLabel() }; },
   batch,
+  newWorld(o, force) {
+    if (hasWork() && !force) throw new Error('there are unsaved changes: save them or pass force: true');
+    host?.newFile();
+    if (!host) dropWorking().catch(() => {});
+    setDoc(emptyWorld(o), {}, { kind: 'new' });
+    setSaveState('clean');
+  },
   select(kind, rec) { select(kind, rec); focusSel(); },
   undo() { const c = hist.done.at(-1); if (!c) throw new Error('nothing to undo'); hist.undo(); return { undone: c.label }; },
   redo() { const c = hist.undone.at(-1); if (!c) throw new Error('nothing to redo'); hist.redo(); return { redone: c.label }; },
@@ -704,6 +807,25 @@ function deleteSel() {
   else if (kind === 'node') commitRoadTx(deleteNode(doc, rec), t('hist.deleteNode'));
   else hist.remove(kind, list(kind), rec, t('hist.delete', { what: KINDS[kind].label }), refreshFor(kind, rec));
   select(null);
+}
+// build your own building: a smaller block on the top one, or a copy of the base next to it
+function addBlock(where) {
+  if (sel?.kind !== 'building' || !sel.rec.parts?.length) return;
+  editSel((b) => {
+    const top = b.parts.reduce((a, p) => ((p.z ?? 0) + (p.h ?? 0) > (a.z ?? 0) + (a.h ?? 0) ? p : a));
+    const base = b.parts.reduce((a, p) => ((p.z ?? 0) < (a.z ?? 0) ? p : a));
+    if (where === 'top') {
+      const c = top.p.reduce((s, q) => [s[0] + q[0] / top.p.length, s[1] + q[1] / top.p.length], [0, 0]), k = 0.78;
+      b.parts.push({ p: top.p.map((q) => [r2(c[0] + (q[0] - c[0]) * k), r2(c[1] + (q[1] - c[1]) * k)]), z: r2((top.z ?? 0) + (top.h ?? 0)),
+        h: r2(Math.max(3.3, (top.h ?? 10) * 0.5)), m: top.m });
+    } else {
+      // along the longest side of the base, by its own extent plus a 2 m gap
+      let best = [1, 0], bl = 0;
+      base.p.forEach((q, i) => { const n = base.p[(i + 1) % base.p.length], l = Math.hypot(n[0] - q[0], n[1] - q[1]); if (l > bl) { bl = l; best = [(n[0] - q[0]) / l, (n[1] - q[1]) / l]; } });
+      const proj = base.p.map((q) => q[0] * best[0] + q[1] * best[1]), shift = Math.max(...proj) - Math.min(...proj) + 2;
+      b.parts.push({ p: base.p.map((q) => [r2(q[0] + best[0] * shift), r2(q[1] + best[1] * shift)]), z: base.z ?? 0, h: r2((base.h ?? 10) * 0.6), m: base.m });
+    }
+  }, t('hist.addBlock'));
 }
 function profileSel() {
   if (sel?.kind !== 'edge') return;
@@ -1080,6 +1202,11 @@ function renderProps() {
     K.rotate ? h('button', { onclick: () => rotateSel(-15), title: 'E' }, '⟳ 15°') : null,
     kind !== 'edge' && kind !== 'node' ? h('button', { onclick: duplicateSel, title: 'Ctrl+D' }, t('common.copy')) : null,
     h('button', { class: 'danger', onclick: deleteSel, title: 'Del' }, t('common.delete'))));
+  if (kind === 'building') {
+    el.querySelector('.actions').append(
+      h('button', { onclick: () => addBlock('top'), title: t('props.blockTopTip') }, t('props.blockTop')),
+      h('button', { onclick: () => addBlock('side'), title: t('props.blockSideTip') }, t('props.blockSide')));
+  }
   if (kind === 'edge') {
     el.querySelector('.actions').prepend(h('button', { onclick: profileSel, title: t('props.profileTip') }, t('props.profile')));
     el.append(h('div', { class: 'muted', style: 'margin-bottom:6px' }, t('props.roadDerived')));
@@ -1094,7 +1221,7 @@ function renderProps() {
 
 // ---------------------------------------------------------------- registry editor (defs)
 const DEF_GROUPS = [['materials', 'defs.group.materials'], ['buildingTypes', 'defs.group.buildingTypes'], ['zones', 'defs.group.zones'], ['surfaces', 'defs.group.surfaces'],
-  ['furniture', 'defs.group.furniture'], ['roadMaterials', 'defs.group.roadMaterials'], ['roadClasses', 'defs.group.roadClasses'], ['roads.classes', 'defs.group.roads.classes']];
+  ['facades', 'defs.group.facades'], ['furniture', 'defs.group.furniture'], ['roadMaterials', 'defs.group.roadMaterials'], ['roadClasses', 'defs.group.roadClasses'], ['roads.classes', 'defs.group.roads.classes']];
 // which record fields point at entries of a group (for rename)
 const REFS = {
   materials: () => (doc.layers.buildings?.items ?? []).flatMap((b) => b.parts ?? []).map((p) => [p, 'm', 'building', null]),
@@ -1103,10 +1230,13 @@ const REFS = {
   zones: () => (doc.layers.buildings?.items ?? []).map((b) => [b, 'zone', 'building', b]),
   furniture: () => (doc.layers.furniture?.items ?? []).map((f) => [f, 't', 'furniture', f]),
   'roads.classes': () => (doc.layers.roads?.edges ?? []).map((e) => [e, 'cls', 'edge', e]),
+  facades: () => [...Object.values(doc.layers.defs.materials ?? {}).map((m) => [m, 'facade', 'def', null]),
+    ...Object.values(doc.layers.defs.buildingTypes ?? {}).map((b) => [b, 'wall', 'def', null])],
 };
 let defGroup = 'materials', defName = null, defFilter = '';
 const groupObj = (g) => (g === 'roads.classes' ? (doc.layers.roads.classes ??= {}) : (doc.layers.defs[g] ??= {}));
 const groupLayer = (g) => (g === 'roads.classes' ? 'roads' : 'defs');
+let facadeSig = null;
 function refreshDefs(g, name) {
   if (g === 'roads.classes') {
     syncClassWidths(doc.layers.roads.classes);
@@ -1114,6 +1244,11 @@ function refreshDefs(g, name) {
     markRoadsDirty();
   }
   if (g === 'materials' || g === 'surfaces' || g === 'roadMaterials') world.refreshMaterials();
+  if (g === 'facades') world.refreshFacades();
+  // a material switching facade changes which walls get textured: the building meshes are regrouped
+  const sig = JSON.stringify(Object.entries(doc.layers.defs.materials ?? {}).map(([k, m]) => [k, m.facade]));
+  if (g === 'materials' && facadeSig !== null && sig !== facadeSig) world.buildBlocks();
+  facadeSig = sig;
   if (g === 'buildingTypes') world.buildBlocks();
   if (g === 'furniture') world.buildFurniture();
   if (g === 'roadClasses' || g === 'roads.classes') buildRoadGraph();
@@ -1133,7 +1268,7 @@ function renameDef(g, from, to) {
     if (g === 'surfaces') world.buildSurfaces();
     if (g === 'furniture') world.buildFurniture();
     if (g === 'roads.classes') buildRoadGraph();
-    for (const [, , kind] of refs) markDirty(KINDS[kind].layer);
+    for (const [, , kind] of refs) markDirty(KINDS[kind]?.layer ?? 'defs');
     refreshDefs(g); defName = b; renderDefs(); renderProps();
   };
   swap(from, to);
@@ -1180,6 +1315,7 @@ function renderDefs() {
         del(); hist.custom(t('hist.deleteType', { name }), 'def', add, del);
       } }, t('common.delete'))));
   const box = h('div'); detail.append(box);
+  if (g === 'facades') detail.insertBefore(facadePreview(rec), box);
   const used = (REFS[g]?.() ?? []).filter(([o, f]) => o[f] === name).length;
   if (REFS[g]) detail.prepend(h('div', { class: 'muted', style: 'margin-bottom:4px' }, t('defs.used', { n: used })));
   inspector(box, rec, {
@@ -1188,6 +1324,18 @@ function renderDefs() {
     sugg: (sub, field) => suggestions(doc, sub, field),
     edit: (fn, label) => hist.edit('def', rec, fn, `${name}: ${label}`, () => { refreshDefs(g, name); renderDefs(); }),
   });
+}
+
+// facade texture preview: the tile by day, and at night with the lit windows
+function facadePreview(params) {
+  const c = facadeCanvases(params), S = 150;
+  const day = h('canvas', { width: S, height: S }), night = h('canvas', { width: S, height: S });
+  day.getContext('2d').drawImage(c.color, 0, 0, S, S);
+  const n = night.getContext('2d');
+  n.filter = 'brightness(0.22)'; n.drawImage(c.color, 0, 0, S, S); n.filter = 'none';
+  if (c.emissive) { n.globalCompositeOperation = 'lighter'; n.drawImage(c.emissive, 0, 0, S, S); }
+  return h('div', { style: 'margin:4px 0 10px' }, h('div', { class: 'muted', style: 'margin-bottom:4px' }, t('defs.preview')),
+    h('div', { class: 'row' }, day, night), h('div', { class: 'muted', style: 'margin-top:6px;line-height:1.4' }, t('defs.facadeHelp')));
 }
 
 // ---------------------------------------------------------------- search

@@ -4,7 +4,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { decode } from '../format/vspb.js';
-import { withDefaults, encodeWorld } from '../format/world.js';
+import { withDefaults, encodeWorld, emptyWorld } from '../format/world.js';
 import { RoadWorld, bbox } from '../world/roadworld.js';
 import { groundSampler, syncClassWidths } from '../world/roadnet.js';
 import { carveRegion } from '../world/carve.js';
@@ -76,6 +76,12 @@ export class FileSession {
       this.roadsChanged(L.roads.edges.filter((e) => e.cls === name), L.roads.edges.filter((e) => e.cls === name).map((e) => bbox(e.pts)));
     }
     this.dirty.add(group === 'roads.classes' ? 'roads' : 'defs');
+  }
+  newWorld(opts, force) {
+    if (this.dirty.size && !force) throw new Error('there are unsaved changes: save them or pass force: true');
+    this.doc = emptyWorld(opts);
+    this.roads = new RoadWorld(this.doc);
+    for (const l of Object.keys(this.doc.layers)) this.dirty.add(l);
   }
   async save() {
     const buf = await encodeWorld(this.doc), tmp = this.file + '.tmp';

@@ -34,8 +34,18 @@ install the desktop app (below).
   (block size, rotation, bend, avenues), buildings along streets by zone preset (downtown,
   midtown, residential, suburb, industrial), and tree patches. A whole run is one Ctrl+Z.
 - **Scripts.** The Script tab runs JS over the world, with one undo step per run.
-- **Start from an empty map.** A new map is 4 × 4 km of flat land with the full type registry.
-  Vespera Bay opens with the **Sample** button.
+- **Start from an empty map.** **File → New map** offers presets from 0.5 to 16 km, including long
+  strips, any custom width and depth, and a terrain grid step (auto or 1–16 m). The map can start
+  with an island relief. Vespera Bay opens with **File → Sample**.
+- **Your own buildings.** Draw an outline, then add **Block on top** or **Block beside**, and change the
+  height, base and material of each block.
+- **Facade textures as types.** Wall textures are generated from parameters: style (curtain wall,
+  windows, brick, ribs), bay and floor height, window size, wall, frame and glass colours, lit
+  windows and shutters. The Types tab shows a live day/night preview.
+- **Export.** 3D model to glTF (`.glb`, Y up, metres, with instancing), a top-down plan to `.png`, all
+  data to `.json`.
+- **Readable properties.** Fields are labelled with units, registry fields are drop-down lists,
+  outlines and axes show as a summary (points, area, length), and headings are in degrees.
 - **Navigation.** Fly the camera with WASD (Shift is faster); the wheel zooms.
 - **Russian and English UI.** The app window has no system title bar: its buttons sit in the
   editor's top bar.

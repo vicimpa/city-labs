@@ -23,6 +23,7 @@ export function setLang(l) {
   for (const fn of listeners) fn(l);
 }
 export const onLang = (fn) => listeners.push(fn);
+export const hasKey = (key) => key in ru;
 
 export function t(key, p) {
   let r = DICTS[lang][key] ?? ru[key] ?? key;

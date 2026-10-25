@@ -20,7 +20,7 @@ for (const g of GENERATORS) { used.add(`gen.${g.id}`); used.add(`gen.${g.id}.hel
 const bad = [...used].filter((k) => !KEY.test(k));
 const missing = { ru: [...used].filter((k) => KEY.test(k) && !(k in ru)), en: [...used].filter((k) => KEY.test(k) && !(k in en)) };
 const onlyRu = Object.keys(ru).filter((k) => !(k in en)), onlyEn = Object.keys(en).filter((k) => !(k in ru));
-const unused = Object.keys(ru).filter((k) => !used.has(k));
+const unused = Object.keys(ru).filter((k) => !used.has(k) && !/^(field|export\.note|insp)\./.test(k));   // field labels and notes are looked up by name
 let fail = false;
 for (const [what, list] of [['not a key', bad], ['missing in ru', missing.ru], ['missing in en', missing.en], ['only in ru', onlyRu], ['only in en', onlyEn]]) {
   if (list.length) { fail = true; console.log(`FAIL ${what}: ${list.join(', ')}`); }

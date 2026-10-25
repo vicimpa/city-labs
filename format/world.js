@@ -28,13 +28,14 @@ export const KINDS = {
   'furniture.items': 'rows', 'buildings.items': 'rows', 'buildings.items.parts': 'rows',
   'buildings.surfaces': 'rows', 'buildings.trains': 'rows',
   'defs.materials': 'map', 'defs.surfaces': 'map', 'defs.roadMaterials': 'map', 'defs.roadClasses': 'map',
-  'defs.buildingTypes': 'map', 'defs.zones': 'map', 'defs.furniture': 'map', 'defs.furniture.parts': 'rows',
+  'defs.buildingTypes': 'map', 'defs.zones': 'map', 'defs.furniture': 'map', 'defs.furniture.parts': 'rows', 'defs.facades': 'map',
 };
 const OPTS = { hints: HINTS, kinds: KINDS };
 
 // ---------------------------------------------------------------- default type registry
-// materials.facade: curtain | brick | ribs | wall ('wall' takes the building type's wall style)
-// buildingTypes.wall: office | house | '' (no facade texture)
+// materials.facade: a facade name (defs.facades) or 'wall' (take the building type's wall facade) or ''
+// buildingTypes.wall: a facade name or '' (no facade texture)
+// facades: parameters of the procedural wall textures (viewer/facades.js)
 // furniture parts: box {s:[w,d,h]} / cyl {r,h,seg} / ico {r} / cone {r,h}; `at` = base centre (ico: centre)
 const mat = (color, o = {}) => ({ color, shininess: 5, specular: '#111111', glow: 0, nightGlow: 0, facade: '', ...o });
 const glass = (color) => mat(color, { shininess: 90, specular: '#88aacc', facade: 'curtain' });
@@ -82,6 +83,13 @@ export const DEFAULT_DEFS = {
       'ship', 'lighthouse', 'tv_tower', 'billboard', 'footbridge', 'metro', 'arch', 'ferris_wheel', 'mast', 'stadium',
       'water_tower', 'fountain', 'construction', 'garage', 'church', 'gas_station', 'pole'].map((t) => [t, { wall: '' }]),
   ]),
+  facades: {
+    curtain: { style: 'curtain', bay: 3, floor: 3.3, window: [0.9, 0.82], wallColor: '#e8ecef', frame: '#e8ecef', glass: '#9aa6b4', lit: 0.38, warm: 0.75, shutters: false, sparse: 0, seed: 7 },
+    office: { style: 'windows', bay: 4, floor: 3.3, window: [0.62, 0.56], wallColor: '#f2f0ea', frame: '#c9c6bf', glass: '#3c4a5a', lit: 0.38, warm: 0.75, shutters: false, sparse: 0, seed: 6 },
+    brick: { style: 'brick', bay: 3.6, floor: 3.3, window: [0.44, 0.53], wallColor: '#ebd1c3', frame: '#e6e1d8', glass: '#323c46', lit: 0.38, warm: 0.75, shutters: false, sparse: 0, seed: 5 },
+    house: { style: 'windows', bay: 5, floor: 3.3, window: [0.5, 0.44], wallColor: '#f6f4ef', frame: '#ffffff', glass: '#41505e', lit: 0.38, warm: 0.75, shutters: true, sparse: 0.25, seed: 4 },
+    ribs: { style: 'ribs', bay: 2, floor: 3.3, window: [0, 0], wallColor: '#ffffff', frame: '#d4d6d8', glass: '#888888', lit: 0, warm: 0, shutters: false, sparse: 0, seed: 3 },
+  },
   zones: {
     downtown: { color: '#ff6b6b' }, midtown: { color: '#ffa94d' }, commercial: { color: '#ffd43b' }, residential: { color: '#69db7c' },
     suburb: { color: '#38d9a9' }, industrial: { color: '#868e96' }, port: { color: '#4dabf7' }, civic: { color: '#9775fa' },
@@ -108,9 +116,24 @@ export const DEFAULT_DEFS = {
 // road classes of a new world (lanes per direction; widths in metres; grades as fractions)
 export const DEFAULT_ROAD_CLASSES = {"avenue":{"lanes":2,"lane_w":3.4,"shoulder":2.4,"median":0.6,"side":4.5,"sigma":60,"r":60,"prio":3,"corner":9,"oneway":false,"max_grade":0.08,"k_min":22},"boulevard":{"lanes":3,"lane_w":3.5,"shoulder":0.6,"median":7,"side":5,"sigma":80,"r":200,"prio":4,"corner":12,"oneway":false,"max_grade":0.07,"k_min":25},"fw12":{"lanes":2,"lane_w":3.6,"shoulder":1.8,"median":0,"side":0,"sigma":90,"r":300,"prio":6,"corner":12,"oneway":true,"max_grade":0.06,"k_min":60},"fw13":{"lanes":3,"lane_w":3.6,"shoulder":1.8,"median":0,"side":0,"sigma":90,"r":300,"prio":6,"corner":12,"oneway":true,"max_grade":0.06,"k_min":60},"industrial":{"lanes":1,"lane_w":4.2,"shoulder":1.6,"median":0.3,"side":0,"sigma":50,"r":40,"prio":2,"corner":12,"oneway":false,"max_grade":0.07,"k_min":15},"lane":{"lanes":1,"lane_w":3.1,"shoulder":0.4,"median":0,"side":2.2,"sigma":25,"r":15,"prio":1,"corner":5,"oneway":false,"max_grade":0.12,"k_min":6},"mountain":{"lanes":1,"lane_w":3.6,"shoulder":1,"median":0.3,"side":0,"sigma":22,"r":30,"prio":2,"corner":8,"oneway":false,"max_grade":0.115,"k_min":6},"raceway":{"lanes":1,"lane_w":6,"shoulder":2,"median":0,"side":0,"sigma":40,"r":40,"prio":3,"corner":12,"oneway":false,"max_grade":0.06,"k_min":15},"ramp1":{"lanes":1,"lane_w":3.8,"shoulder":0.6,"median":0,"side":0,"sigma":30,"r":60,"prio":5,"corner":10,"oneway":true,"max_grade":0.07,"k_min":18},"runway":{"lanes":1,"lane_w":22,"shoulder":0,"median":0,"side":0,"sigma":200,"r":500,"prio":3,"corner":12,"oneway":false,"max_grade":0.01,"k_min":100},"rural":{"lanes":1,"lane_w":3.6,"shoulder":1.4,"median":0.3,"side":0,"sigma":30,"r":60,"prio":2,"corner":10,"oneway":false,"max_grade":0.1,"k_min":15},"street":{"lanes":1,"lane_w":3.6,"shoulder":2.3,"median":0.3,"side":3.5,"sigma":45,"r":30,"prio":2,"corner":7,"oneway":false,"max_grade":0.1,"k_min":12}};
 
-/** A new, empty world: flat land of size × size metres at `height`, no roads or buildings, the default registry. */
-export function emptyWorld({ size = 4000, res = 4, height = 10 } = {}) {
-  const n = Math.round(size / res) + 1, half = ((n - 1) * res) / 2;
+export const MAX_CELLS = 4_200_000;          // heightfield cells a browser still handles (two Float32 grids + the mesh)
+const AUTO_CELLS = 1_100_000;                // what 'auto' aims for: light enough to edit smoothly
+/** Grid step for a map: the requested one if it fits MAX_CELLS, else (and for 'auto') the finest of
+ *  1, 2, 4, 6, 8, 12, 16… m within the budget. */
+export function gridStep(width, depth, res = 'auto') {
+  const cells = (r) => (Math.round(width / r) + 1) * (Math.round(depth / r) + 1);
+  if (res !== 'auto' && cells(+res) <= MAX_CELLS) return +res;
+  const budget = res === 'auto' ? AUTO_CELLS : MAX_CELLS;
+  return [1, 2, 4, 6, 8, 12, 16, 24, 32, 48, 64].find((r) => r >= (res === 'auto' ? 2 : +res) && cells(r) <= budget) ?? 64;
+}
+
+/**
+ * A new, empty world: flat land of width × depth metres at `ground` metres, no roads or buildings,
+ * the default registry. `size` sets both sides; `res` is the grid step in metres (or 'auto').
+ */
+export function emptyWorld({ size, width = size ?? 4000, depth = width, res = 'auto', ground, height } = {}) {
+  const step = gridStep(width, depth, res), z = ground ?? height ?? 10;
+  const nx = Math.round(width / step) + 1, ny = Math.round(depth / step) + 1;
   const classes = structuredClone(DEFAULT_ROAD_CLASSES);
   for (const c of Object.values(classes)) {
     const hw = c.oneway ? (c.lanes * c.lane_w) / 2 + c.shoulder : c.lanes * c.lane_w + c.shoulder + c.median / 2;
@@ -119,8 +142,8 @@ export function emptyWorld({ size = 4000, res = 4, height = 10 } = {}) {
   return withDefaults({
     meta: { created: new Date().toISOString(), generator: 'city-labs' },
     layers: {
-      terrain: { layer: 'terrain', x0: -half, y0: -half, res, nx: n, ny: n, sea_level: 0,
-        base: new Float32Array(n * n).fill(height), h: new Float32Array(n * n).fill(height), bore: new Uint32Array(0) },
+      terrain: { layer: 'terrain', x0: -((nx - 1) * step) / 2, y0: -((ny - 1) * step) / 2, res: step, nx, ny, sea_level: 0,
+        base: new Float32Array(nx * ny).fill(z), h: new Float32Array(nx * ny).fill(z), bore: new Uint32Array(0) },
       roads: { layer: 'roads', classes, nodes: [], edges: [] },
       furniture: { layer: 'furniture', items: [] },
       buildings: { layer: 'buildings', items: [], surfaces: [], trees: [], rails: [], cables: [], wind: [], trains: [] },
@@ -160,6 +183,6 @@ export { assemble };
 export function facadeFor(defs, material, type) {
   const wall = defs.buildingTypes?.[type]?.wall;
   if (!wall) return null;
-  const f = defs.materials?.[material]?.facade;
-  return f === 'wall' ? wall : f || null;
+  const f = defs.materials?.[material]?.facade, name = f === 'wall' ? wall : f;
+  return name && defs.facades?.[name] ? name : null;
 }

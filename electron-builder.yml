@@ -6,6 +6,8 @@ copyright: Copyright © 2026 vicimpa
 directories:
   app: build/app
   output: release
+  buildResources: app/build-res
+icon: app/build-res/icon.png
 asar: true
 # everything the app needs is inlined into bundle/main.cjs: ship no node_modules
 files:

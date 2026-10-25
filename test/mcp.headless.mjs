@@ -6,6 +6,7 @@ import path from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { decode } from '../format/vspb.js';
+import { TOOLS } from '../mcp/ops.js';
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vspb-mcp-'));
 const file = path.join(dir, 'world.vspb');
@@ -20,7 +21,7 @@ const call = async (name, args = {}) => {
   return JSON.parse(r.content[0].text);
 };
 const tools = (await client.listTools()).tools.map((t) => t.name);
-ok(tools.length === 21 && tools.includes('map') && tools.includes('run_script') && tools.includes('generate'), `tools listed: ${tools.join(', ')}`);
+ok(tools.length === TOOLS.length && ['map', 'run_script', 'generate', 'new_world'].every((n) => tools.includes(n)), `tools listed: ${tools.join(', ')}`);
 const info = await call('world_info');
 ok(info.counts.building > 4000 && info.counts.edge === 220, `world_info: ${JSON.stringify(info.counts)}`);
 ok((await call('list_types')).materials.includes('brick'), 'list_types');
@@ -65,6 +66,8 @@ ok(genB.result.buildings > 0, `generate buildings: ${genB.result.buildings}`);
 const shot = await client.callTool({ name: 'screenshot', arguments: {} });
 ok(shot.isError && /app/.test(shot.content[0].text), 'screenshot headless explains it needs the app');
 await call('delete', { kind: 'furniture', index: lamp.index });
+const refused = await client.callTool({ name: 'new_world', arguments: { size_m: 1000 } });
+ok(refused.isError && /unsaved/.test(refused.content[0].text), 'new_world refuses to drop unsaved changes');
 const saved = await call('save');
 ok(saved.bytes > 1e6, 'save');
 await client.close();

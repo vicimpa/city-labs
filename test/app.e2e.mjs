@@ -10,6 +10,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { decode } from '../format/vspb.js';
 import { FileSession } from '../mcp/file-session.js';
+import { TOOLS } from '../mcp/ops.js';
 
 const PORT = '7399', out = process.argv[2] ?? os.tmpdir();
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vspb-app-')), file = path.join(dir, 'world.vspb');
@@ -38,7 +39,7 @@ const call = async (name, args = {}) => {
   return r;
 };
 const J = async (name, args) => JSON.parse((await call(name, args)).content[0].text);
-ok((await mcp.listTools()).tools.length === 21, 'HTTP MCP lists the tools');
+ok((await mcp.listTools()).tools.length === TOOLS.length, 'HTTP MCP lists the tools');
 const info = await J('world_info');
 ok(info.app === true && info.file === file, 'world_info comes from the editor');
 

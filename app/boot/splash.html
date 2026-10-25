@@ -2,15 +2,12 @@
 <html>
 <head>
 <meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'">
 <title>City Labs</title>
 <style>
   html, body { margin: 0; height: 100%; background: #0b0f14; color: #d8dde3; font: 13px system-ui, sans-serif; -webkit-app-region: drag; user-select: none; overflow: hidden; }
   main { height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; padding: 0 28px; box-sizing: border-box; text-align: center; }
-  .logo { width: 96px; height: 96px; border-radius: 22px; background: linear-gradient(140deg, #3fb6ff, #1f4d7a 60%, #0f2236); position: relative; box-shadow: 0 8px 28px #0008; }
-  .logo::before, .logo::after { content: ''; position: absolute; bottom: 18px; background: #e8f4ff; border-radius: 2px; }
-  .logo::before { left: 20px; width: 16px; height: 46px; box-shadow: 22px -14px 0 #cfe6ff, 44px 8px 0 #b6d6f5; }
-  .logo::after { left: 14px; right: 14px; height: 3px; bottom: 14px; opacity: .7; }
+  .logo { width: 96px; height: 96px; filter: drop-shadow(0 8px 20px #0008); }
   h1 { margin: 6px 0 0; font-size: 20px; font-weight: 600; letter-spacing: .3px; }
   #ver { color: #7f8c9b; font-size: 12px; margin-top: -8px; }
   #text { min-height: 34px; color: #b9c4cf; line-height: 1.35; }
@@ -26,7 +23,7 @@
 </head>
 <body>
 <main>
-  <div class="logo"></div>
+  <img class="logo" src="logo.svg" alt="">
   <h1>City Labs</h1>
   <div id="ver"></div>
   <div id="text"></div>

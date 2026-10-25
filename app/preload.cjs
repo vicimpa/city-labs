@@ -16,6 +16,7 @@ contextBridge.exposeInMainWorld('vspbHost', {
   newFile: () => ipcRenderer.invoke('file:new'),
   save: (bytes) => ipcRenderer.invoke('file:save', bytes),
   saveAs: (bytes) => ipcRenderer.invoke('file:saveAs', bytes),
+  exportFile: (name, bytes) => ipcRenderer.invoke('file:export', name, bytes),
   info: () => ipcRenderer.invoke('app:info'),
   update: (action) => ipcRenderer.invoke('app:update', action),
   setDirty: (d) => ipcRenderer.send('doc:dirty', d),

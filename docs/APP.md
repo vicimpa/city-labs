@@ -58,6 +58,7 @@ The tools are defined once in `mcp/ops.js`, against an abstract session, and are
 | `map` | a top-down map image of an area (or the whole city), with numbered roads in the legend; works without the app |
 | `run_script` | JavaScript over the world for queries and bulk edits: one undo step, derived data rebuilt once |
 | `generate` | a standard generator with parameters (`terrain`, `streets`, `buildings`, `trees`): one undo step |
+| `new_world` | a new empty map, `width_m` × `depth_m` (or `size_m`), grid step `res_m` or automatic; refused while there are unsaved changes unless `force` |
 | `def_set` | creates, replaces or deletes a registry entry |
 | `save` | writes the file |
 | `screenshot` (app) | the 3D view as a PNG, optionally after aiming the camera or focusing a record |
@@ -105,6 +106,20 @@ that list, and its centre fields default to the point the camera looks at. MCP `
 
 To add a generator, give it an entry in `GENERATORS`, plus `gen.<id>`, `gen.<id>.help` and
 `gen.p.<param>` in both locales.
+
+## Export and facades
+
+- **Export** (File → Export…, Cmd+E in the app) writes one of three things:
+  - `.glb`: glTF 2.0, Y up, metres. The terrain can be thinned to ½ or ¼ of its grid, or left out.
+    Objects and trees are exported as instances (`EXT_mesh_gpu_instancing`).
+  - `.png`: the top-down plan of the whole map, as the `map` tool draws it, up to 8192 px wide.
+  - `.json`: every layer.
+
+  The browser downloads the file; the app asks where to save it. The code is in `editor/export.js`.
+- **Facades** live in the registry (`defs.facades`), and `viewer/facades.js` paints them on a canvas
+  from their parameters. A material picks a facade by name in `facade`, or uses `wall` to take the
+  facade of the building type (`buildingTypes.wall`). The facade colours are multiplied by the
+  material colour.
 
 ## Window and language
 

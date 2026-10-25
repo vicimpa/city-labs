@@ -115,7 +115,8 @@ export function suggestions(doc, kind, field) {
     'building.type': k(d.buildingTypes), 'building.zone': k(d.zones), 'part.m': k(d.materials),
     'surface.m': k(d.surfaces), 'furniture.t': k(d.furniture), 'edge.cls': k(doc.layers.roads?.classes),
     'node.kind': ['end', 'transition', 'junction', 'joint'],
-    'materials.facade': ['', 'wall', 'curtain', 'brick', 'ribs'], 'buildingTypes.wall': ['', 'office', 'house'],
+    'materials.facade': ['', 'wall', ...k(d.facades)], 'buildingTypes.wall': ['', ...k(d.facades)],
+    'facades.style': ['curtain', 'windows', 'brick', 'ribs'],
     'edge.name': [...new Set((doc.layers.roads?.edges ?? []).map((e) => e.name))].slice(0, 400),
     'fpart.k': ['box', 'cyl', 'ico', 'cone'],
   };

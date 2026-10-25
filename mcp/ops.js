@@ -233,6 +233,18 @@ export const TOOLS = [
     run(s, { group, name, value }) { s.setDef(group, name, value === null ? null : structuredClone(value)); return { group, name, deleted: value === null }; },
   },
   {
+    name: 'new_world', title: 'Start a new empty map',
+    description: 'Replace the open world with a new empty map: flat land of width_m × depth_m metres (250–64000; `size_m` sets both) at `ground` metres, no roads or buildings, the default type registry. The grid step is res_m, or chosen automatically to keep the heightfield within ~4 M cells. Refused while there are unsaved changes unless force is true. Follow with generate (terrain, streets, buildings, trees) to fill it.',
+    schema: (z) => ({ size_m: z.number().min(250).max(64000).optional(), width_m: z.number().min(250).max(64000).optional(), depth_m: z.number().min(250).max(64000).optional(),
+      res_m: z.number().positive().optional(), ground: z.number().optional(), force: z.boolean().optional() }),
+    run(s, a) {
+      const width = a.width_m ?? a.size_m ?? 4000, depth = a.depth_m ?? a.size_m ?? width;
+      s.newWorld({ width, depth, res: a.res_m ?? 'auto', ground: a.ground ?? 10 }, !!a.force);
+      const t0 = s.doc.layers.terrain;
+      return { width_m: width, depth_m: depth, res_m: t0.res, cells: t0.nx * t0.ny, ...s.info() };
+    },
+  },
+  {
     name: 'map', title: 'Map of an area',
     description: 'Top-down map image of an area, rendered from the data (no app needed): shaded terrain, water, ground patches, roads (dark edge = bridge, dashed = tunnel), junctions, buildings coloured by material, rails, trees, a coordinate grid labelled in metres and numbered markers on the longest visible roads. Give center [x,y] + size_m (default 2000) or bbox [x0,y0,x1,y1]; with neither, the whole map. The text part maps marker numbers to road ids/names and gives the scale. Use it to look around, find places and check edits.',
     schema: (z) => ({
