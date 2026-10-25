@@ -17,13 +17,15 @@ const KIND_DOC = `Record kinds and their shape:
 - building: {type, zone, parts:[{p:[[x,y],...] outline, holes?, z base height, h height, m material}]} (no id, addressed by index)
 - surface: ground patch {p:[[x,y],...], holes?, m surface material}
 - furniture: {t prefab, p:[x,y,z], h heading rad, owner?} — owner 'e<id>'/'n<id>' marks items the road rules place (regenerated when that road changes)
-- tree: [x,y,z]; wind: wind turbine [x,y,z,0]; rail: polyline [[x,y,z],...]; train: {pts, closed}
+- tree: [x,y,z]; wind: wind turbine [x,y,z,0]; train: {pts, closed}
+- rail: railway track polyline [[x,y,z],...] (z = track level; where it runs >2.5 m above the ground, piers and a viaduct girder are derived)
+- powerline: {type: 'tower' | 'pole', pts: [[x,y],...]} — one point per post (towers ~320 m apart, poles ~50 m); posts stand on the ground, wires are derived
 - edge: road {id, name, cls, n:[node,node], pts:[[x,y,z],...] 4 m apart, elev[], tunnel[], trim (derived)}
 - node: road junction {id, p:[x,y,z], kind (derived), grad}
-Coordinates are metres, Z up, the map spans about ±4600 m. Asphalt, markings, junction pads, pier bents, the
-graded terrain and owned furniture are derived and rebuilt automatically after every change.`;
+Coordinates are metres, Z up, the map spans about ±4600 m. Asphalt, markings, junction pads, pier bents, rail
+piers, power line posts and wires, the graded terrain and owned furniture are derived and rebuilt automatically after every change.`;
 
-const KINDS_ENUM = ['building', 'surface', 'furniture', 'tree', 'wind', 'rail', 'train', 'edge', 'node'];
+const KINDS_ENUM = ['building', 'surface', 'furniture', 'tree', 'wind', 'rail', 'train', 'powerline', 'edge', 'node'];
 
 // ---------------------------------------------------------------- helpers
 function list(s, kind) {
@@ -139,6 +141,7 @@ export const TOOLS = [
     run(s, { kind, record }) {
       if (kind === 'building' && !(record?.parts?.length)) throw new Error('a building needs parts: [{p, z, h, m}]');
       if ((kind === 'surface') && !(record?.p?.length >= 3)) throw new Error('a surface needs an outline p of 3+ points');
+      if (kind === 'powerline' && !(record?.pts?.length >= 2)) throw new Error("a power line needs pts: [[x,y],...] with 2+ posts and type 'tower' or 'pole'");
       const rec = structuredClone(record);
       s.insert(kind, rec, t('mcp.create', { what: s.kinds[kind].label }));
       return summary(s, kind, rec, list(s, kind).indexOf(rec));

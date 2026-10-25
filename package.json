@@ -17,7 +17,7 @@
     "test:app": "node test/app.e2e.mjs",
     "build:app": "node tools/build-app.mjs --asar",
     "dist": "node tools/build-app.mjs --asar && electron-builder",
-    "test": "node test/i18n.check.mjs && npm run test:vspb && npm run test:mcp && npm run test:roads",
+    "test": "node test/i18n.check.mjs && node test/spline.check.mjs && npm run test:vspb && npm run test:mcp && npm run test:roads",
     "test:update": "node test/app.update.mjs",
     "build:web": "node tools/build-web.mjs"
   },

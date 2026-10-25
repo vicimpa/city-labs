@@ -21,12 +21,13 @@ export const HINTS = {
   'buildings.items.parts.z': 'f32', 'buildings.items.parts.h': 'f32',
   'buildings.surfaces.p': 'f32x2[]', 'buildings.surfaces.holes': 'f32x2[][]',
   'buildings.trains.pts': 'f32x3[]',
+  'buildings.powerlines.pts': 'f32x2[]',
 };
 // collections that may be empty (an empty array alone can't tell a list of records from a list of numbers)
 export const KINDS = {
   'roads.classes': 'map', 'roads.nodes': 'rows', 'roads.edges': 'rows',
   'furniture.items': 'rows', 'buildings.items': 'rows', 'buildings.items.parts': 'rows',
-  'buildings.surfaces': 'rows', 'buildings.trains': 'rows',
+  'buildings.surfaces': 'rows', 'buildings.trains': 'rows', 'buildings.powerlines': 'rows',
   'defs.materials': 'map', 'defs.surfaces': 'map', 'defs.roadMaterials': 'map', 'defs.roadClasses': 'map',
   'defs.buildingTypes': 'map', 'defs.zones': 'map', 'defs.furniture': 'map', 'defs.furniture.parts': 'rows', 'defs.facades': 'map',
 };
@@ -146,7 +147,7 @@ export function emptyWorld({ size, width = size ?? 4000, depth = width, res = 'a
         base: new Float32Array(nx * ny).fill(z), h: new Float32Array(nx * ny).fill(z), bore: new Uint32Array(0) },
       roads: { layer: 'roads', classes, nodes: [], edges: [] },
       furniture: { layer: 'furniture', items: [] },
-      buildings: { layer: 'buildings', items: [], surfaces: [], trees: [], rails: [], cables: [], wind: [], trains: [] },
+      buildings: { layer: 'buildings', items: [], surfaces: [], trees: [], rails: [], cables: [], powerlines: [], wind: [], trains: [] },
     },
     schema: { hints: { ...HINTS }, kinds: { ...KINDS } },
   });

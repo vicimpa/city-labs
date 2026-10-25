@@ -18,6 +18,13 @@ install the desktop app (below).
   junctions or split the road they land on. Drag its axis with a soft falloff, re-level it over the
   terrain, and delete roads or junctions. Freeways, avenues, streets, rural and mountain roads come
   with lanes, markings, curbs, sidewalks, crash barriers, guardrails, tunnels and pier bents.
+- **Lines through control points.** Roads, railways and train routes are edited through a few
+  control points: the line bends smoothly between its neighbours, and Shift+drag or PgUp/PgDn sets
+  a point's height (a raised road becomes a bridge).
+- **Railways and power lines.** New track gets rounded corners; where it runs above the ground,
+  the viaduct girder and piers are built for it. Power lines (towers or wooden poles) are laid by
+  clicking the corners of the route. Posts in between are placed automatically, and wires are
+  strung between them.
 - **Terrain.** Raise, lower, smooth and flatten the natural ground. Roads keep their cuts and
   embankments.
 - **City contents.** Edit building outlines with holes and stacked parts, ground patches, objects

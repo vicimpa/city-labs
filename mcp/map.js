@@ -1,5 +1,5 @@
 // Top-down map of a world area as an image, for agents (MCP `map`): shaded terrain and water,
-// ground patches, roads (bridges outlined, tunnels dashed), junctions, buildings, rails, trees,
+// ground patches, roads (bridges outlined, tunnels dashed), junctions, buildings, rails, power lines, trees,
 // a coordinate grid and numbered road markers explained in the returned legend.
 // Pure JS (no canvas), so it renders the same in Node and in the editor.
 
@@ -83,9 +83,9 @@ function ground(z) {               // same palette as the 3D terrain (viewer/wor
   if (z < 160) return [(0.33 + (z - 40) * 0.001) * 255, 0.36 * 255, (0.25 + (z - 40) * 0.0008) * 255];
   return [128, 128, 122];
 }
-const WATER = [24, 58, 84], SIDEWALK = [168, 164, 155], ASPHALT = [52, 55, 60], DECK = [26, 28, 31], RAIL = [96, 88, 78], HL = [255, 45, 200];
+const WATER = [24, 58, 84], SIDEWALK = [168, 164, 155], ASPHALT = [52, 55, 60], DECK = [26, 28, 31], RAIL = [96, 88, 78], POWER = [150, 40, 30], HL = [255, 45, 200];
 
-export const MAP_LAYERS = ['terrain', 'surfaces', 'roads', 'buildings', 'rails', 'trees', 'furniture', 'grid', 'labels'];
+export const MAP_LAYERS = ['terrain', 'surfaces', 'roads', 'buildings', 'rails', 'power', 'trees', 'furniture', 'grid', 'labels'];
 
 /**
  * Render a map. opts: bbox [x0,y0,x1,y1] in metres (y up), width px, layers (default all but
@@ -172,6 +172,13 @@ export function renderMap(doc, { bbox, width = 1024, layers, highlight = [], gra
       if (mpp < 3) R.line([...rings[0], rings[0][0]], 1, [25, 25, 28], { a: 0.55 });
     }
   }
+  // power lines: the route, a dot per post
+  if (on.has('power')) for (const pl of L.buildings?.powerlines ?? []) {
+    if (!(pl.pts?.length >= 2) || !inView(pl.pts, pad)) continue;
+    const pp = pl.pts.map((q) => P(q[0], q[1]));
+    R.line(pp, 1.2, POWER, { a: 0.85 });
+    for (const [px, py] of pp) R.disc(px, py, Math.max((pl.type === 'pole' ? 1 : 4) / mpp, 1.6), POWER);
+  }
   if (on.has('furniture')) for (const f of L.furniture?.items ?? []) {
     if (f.p[0] < x0 || f.p[0] > x1 || f.p[1] < y0 || f.p[1] > y1) continue;
     const [px, py] = P(f.p[0], f.p[1]); R.disc(px, py, 1.6, [250, 200, 60]);
@@ -181,8 +188,9 @@ export function renderMap(doc, { bbox, width = 1024, layers, highlight = [], gra
     const rings = kind === 'building' ? rec.parts.map((p) => p.p) : rec.p?.[0]?.length ? [rec.p] : rec.pts ? [rec.pts] : null;
     if (rings) for (const r of rings) {
       const pp = r.map((q) => P(q[0], q[1]));
-      if (kind !== 'edge' && kind !== 'rail') R.polygon([pp], HL, 0.25);
-      R.line(kind === 'edge' || kind === 'rail' ? pp : [...pp, pp[0]], 3, HL);
+      const open = kind === 'edge' || kind === 'rail' || kind === 'train' || kind === 'powerline';
+      if (!open) R.polygon([pp], HL, 0.25);
+      R.line(open ? pp : [...pp, pp[0]], 3, HL);
     } else if (kinds?.[kind]) {
       const [x, y] = kinds[kind].center(rec), [px, py] = P(x, y);
       R.disc(px, py, 7, HL); R.disc(px, py, 3, [255, 255, 255]);

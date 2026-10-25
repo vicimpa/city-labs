@@ -5,7 +5,7 @@ import { addRoad, reprofile, deleteEdge, deleteNode } from '../editor/roadedit.j
 
 export const SCRIPT_API = `The world API:
 - world.layers: the raw data (terrain, roads, buildings, furniture, defs, …)
-- world.list(kind): the records of a kind (building, surface, furniture, tree, wind, rail, train, edge, node)
+- world.list(kind): the records of a kind (building, surface, furniture, tree, wind, rail, train, powerline, edge, node)
 - world.find(kind, pred?): [{ index, rec }] where pred(rec, index) is true
 - world.get(kind, index | id), world.center(kind, rec): [x, y, z]
 - world.edit(kind, rec, fn): fn(rec) mutates the record (undoable); derived geometry follows

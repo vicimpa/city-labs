@@ -7,11 +7,14 @@ import { decodeWorld, encodeWorldLayer, assemble, emptyWorld, gridStep, LAYERS }
 import { loadWorking, saveWorking, dropWorking } from './store.js';
 import { History, clone } from './history.js';
 import { KINDS, suggestions } from './kinds.js';
-import { RoadTx, addRoad, reprofile, deleteEdge, deleteNode } from './roadedit.js';
+import { RoadTx, addRoad, reprofile, deleteEdge, deleteNode, edgesAt, followEnd } from './roadedit.js';
 import { bbox } from '../world/roadworld.js';
 import { syncClassWidths, groundSampler } from '../world/roadnet.js';
 import { carveRegion } from '../world/carve.js';
 import { cumLength, smoothstep } from '../world/geom.js';
+import { controlIndices, reshape } from '../world/spline.js';
+import { filletPath, resample, levelFlags, SPACING } from '../world/profile.js';
+import { layPosts, POWER_TYPES } from '../world/power.js';
 import { runTool, TOOL_BY_NAME } from '../mcp/ops.js';
 import { runScript, SCRIPT_API } from '../mcp/script.js';
 import { GENERATORS, GENERATOR_BY_ID, runGenerator } from '../mcp/generators.js';
@@ -89,7 +92,7 @@ let handles = [], hover = null;        // vertex handles of the selection
 const hist = new History(onHistory);
 const vis = { terrain: true, roads: true, furniture: true, blocks: true, surfaces: true, trees: true, rails: true, wind: true, trains: true, cables: true, roadGraph: true, grid: true };
 
-const OPTS = { snap: true, soft: 40, rCls: 'street', rName: '', bType: 'block', bZone: 'midtown', bMat: 'concrete', bH: 18, sMat: 'plaza', fType: 'lamp', fRot: 0,
+const OPTS = { snap: true, soft: 40, ctrl: true, ctrlTol: 1.5, railR: 300, pType: 'tower', pSpan: 320, rCls: 'street', rName: '', bType: 'block', bZone: 'midtown', bMat: 'concrete', bH: 18, sMat: 'plaza', fType: 'lamp', fRot: 0,
   brush: 'raise', radius: 40, strength: 6 };
 const opts = { ...OPTS };
 try { Object.assign(opts, JSON.parse(localStorage.getItem('vspb-editor-opts') ?? '{}')); } catch { /* private mode */ }
@@ -679,7 +682,7 @@ function nearestRoad(sx, sy, px = 9, nodesOnly = false) {
   }
   return best;
 }
-const PICK = ['roads', 'blocks', 'surfaces', 'furniture', 'trees', 'rails', 'wind', 'trains'];
+const PICK = ['roads', 'blocks', 'surfaces', 'furniture', 'trees', 'rails', 'wind', 'trains', 'cables'];
 function pick(ev) {
   const r = rayAt(ev), g = groundHit(r), gd = g ? g.distanceTo(r.origin) : Infinity;
   if (vis.roadGraph) { const nd = nearestRoad(ev.clientX, ev.clientY, 7, true); if (nd) return { ...nd, point: new THREE.Vector3(...nd.rec.p) }; }
@@ -703,6 +706,7 @@ const HOVER_MAT = new THREE.PointsMaterial({ color: 0xffd23f, size: 13, sizeAtte
 const ringZ = (ring, i, p) => (ring.z ? ring.z(i) + 0.3 : ground(p[0], p[1]) + 0.4);
 
 function select(kind, rec, { tab = true } = {}) {
+  if (sel?.rec !== rec) activePt = null;
   sel = kind && rec ? { kind, rec } : null;
   hover = null;
   drawSelection(); renderProps();
@@ -740,7 +744,12 @@ function drawSelection() {
   const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(segs, 3));
   const lines = new THREE.LineSegments(g, SEL_MAT); lines.renderOrder = 10; selGroup.add(lines);
   if (tool === 'select' && K.rings) {
-    for (const ring of K.rings(rec)) ring.pts.forEach((p, i) => handles.push({ ring, i, p, z: ringZ(ring, i, p) }));
+    for (const ring of K.rings(rec)) {
+      if (ctrlMode()) controlsOf(ring.pts).forEach((i, k, C) => handles.push({ ring, i, p: ring.pts[i], z: ringZ(ring, i, ring.pts[i]), k, C }));
+      else ring.pts.forEach((p, i) => handles.push({ ring, i, p, z: ringZ(ring, i, p) }));
+    }
+    // a bent line has new point objects: the hovered control point is found again by its number
+    if (hover?.k !== undefined) hover = handles.find((x) => x.k === hover.k && x.ring.pts === hover.ring.pts) ?? null;
     const hp = new THREE.BufferGeometry().setFromPoints(handles.map((hd) => new THREE.Vector3(hd.p[0], hd.p[1], hd.z)));
     const pts = new THREE.Points(hp, HANDLE_MAT); pts.renderOrder = 11; selGroup.add(pts);
     if (hover) {
@@ -789,6 +798,88 @@ function linkedVertices(hd) {
     if (p !== hd.p && Math.abs(p[0] - hd.p[0]) < 0.01 && Math.abs(p[1] - hd.p[1]) < 0.01) out.push([ring.pts, i]);
   });
   return out;
+}
+
+// Lines (road axes, railways, train routes) are dense; with "control points" on, only the points
+// that carry their shape get handles, and moving one bends the line smoothly between its neighbours.
+const CURVES = new Set(['edge', 'rail', 'train']);
+const ctrlMode = () => opts.ctrl && sel && CURVES.has(sel.kind);
+const ctrlCache = new WeakMap();       // points array → its control indices, kept across edits so handles stay put
+function controlsOf(pts) {
+  const c = ctrlCache.get(pts);
+  if (c && c.n === pts.length && c.tol === opts.ctrlTol) return c.C;
+  const C = controlIndices(pts, Math.max(+opts.ctrlTol || 0, 0.05), 120);
+  ctrlCache.set(pts, { C, n: pts.length, tol: opts.ctrlTol });
+  return C;
+}
+// road axes keep the 4 m sampling; railways keep their own
+function stepOf(kind, pts) {
+  if (kind === 'edge') return SPACING;
+  const d = [];
+  for (let i = 1; i < pts.length; i++) d.push(Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]));
+  d.sort((a, b) => a - b);
+  return Math.min(Math.max(d[d.length >> 1] ?? SPACING, 2), 12);
+}
+// re-draw a line from its state at the start of the gesture; flags per point follow along
+function applyReshape(c, op) {
+  const res = reshape(c.start, c.C, op, c.step);
+  c.pts.splice(0, c.pts.length, ...res.pts);
+  c.C2 = res.C;
+  ctrlCache.set(c.pts, { C: res.C, n: c.pts.length, tol: opts.ctrlTol });
+  if (c.ends && op.move !== undefined) {
+    // a road end: its node goes along, the other roads there bend over their first 40 m
+    const last = op.move !== 0, q = c.pts[last ? c.pts.length - 1 : 0], q0 = c.start[last ? c.start.length - 1 : 0];
+    const d = [q[0] - q0[0], q[1] - q0[1], (q[2] ?? 0) - (q0[2] ?? 0)];
+    c.ends.nd.p = c.ends.p0.map((v, i) => r2(v + d[i]));
+    for (const o of c.ends.others) { o.e.pts.forEach((p, i) => { p[0] = o.start[i][0]; p[1] = o.start[i][1]; p[2] = o.start[i][2]; }); followEnd(o.e, o.k, d); }
+  }
+  if (sel.kind === 'edge') edgeFlags(sel.rec);
+}
+// bridges and tunnels of a road follow its levels over the natural ground
+function edgeFlags(rec) {
+  const N = groundSampler(doc.layers.terrain), z = rec.pts.map((p) => p[2]);
+  const f = levelFlags({ s: cumLength(rec.pts) }, z, rec.pts.map((p) => N(p[0], p[1])));
+  rec.elev = f.elev; rec.tunnel = f.tunnel;
+}
+function ctrlState(hd, C = hd.C) {
+  const pts = hd.ring.pts;
+  return { pts, C: [...C], start: pts.map((q) => [...q]), step: stepOf(sel.kind, pts) };
+}
+// the ends of a road carry its node and the other roads at it
+function withEnds(c, k) {
+  if (sel.kind !== 'edge' || (k !== 0 && k !== c.C.length - 1)) return c;
+  const R = doc.layers.roads, id = sel.rec.n?.[k === 0 ? 0 : 1], nd = R.nodes.find((n) => n.id === id);
+  if (!nd || sel.rec.n[0] === sel.rec.n[1]) return c;
+  c.ends = { nd, p0: [...nd.p], others: edgesAt(R, id).filter((e) => e !== sel.rec).map((e) => ({ e, k: e.n[0] === id ? 0 : 1, start: e.pts.map((q) => [...q]) })) };
+  return c;
+}
+
+// the point of a line grabbed last: its position and height can be typed in or nudged (PgUp / PgDn)
+let activePt = null;
+function activeIndex() {
+  const a = activePt;
+  if (!a || !sel || !CURVES.has(sel.kind) || KINDS[sel.kind].rings(sel.rec)[0].pts !== a.pts) return -1;
+  return a.k === undefined ? (a.i < a.pts.length ? a.i : -1) : controlsOf(a.pts)[a.k] ?? -1;
+}
+function setActivePoint(to, label = t('hist.vertex')) {
+  const a = activePt, i = activeIndex();
+  if (i < 0) return;
+  if (a.k !== undefined) editSel(() => applyReshape(withEnds({ ...ctrlState({ ring: { pts: a.pts } }, controlsOf(a.pts)), k: a.k }, a.k), { move: a.k, to }), label);
+  else editSel(() => { const p = a.pts[i]; p[0] = r2(to[0]); p[1] = r2(to[1]); p[2] = r2(to[2]); if (sel.kind === 'edge') edgeFlags(sel.rec); }, label);
+}
+function raiseActive(dz) {
+  const i = activeIndex(); if (i < 0) return false;
+  const p = activePt.pts[i];
+  setActivePoint([p[0], p[1], p[2] + dz], t('hist.pointHeight'));
+  return true;
+}
+function removeControl(hd) {
+  if (hd.k === 0 || hd.k === hd.C.length - 1 || hd.C.length < 3) return;   // the ends stay
+  editSel(() => applyReshape(ctrlState(hd), { remove: hd.k }), t('hist.deleteVertex'));
+}
+function removeVertex(hd) {
+  if (hd.k !== undefined) return removeControl(hd);
+  if (hd.ring.pts.length > (hd.ring.closed ? 3 : 2)) editSel(() => { for (const [pts, i] of linkedVertices(hd).sort((a, b) => b[1] - a[1])) pts.splice(i, 1); }, t('hist.deleteVertex'));
 }
 
 // ---------------------------------------------------------------- edits on the selection
@@ -875,9 +966,16 @@ function finishDraw() {
     commitRoadTx(res.tx, t('hist.newRoad'));
     return select('edge', res.edge);
   }
+  if (kind === 'power') {
+    if (pts.length < 2) return;
+    const posts = layPosts(pts, Math.max(+opts.pSpan || POWER_TYPES[opts.pType].span, 10));
+    return insertNew('powerline', { type: opts.pType, pts: posts.map((p) => [r2(p[0]), r2(p[1])]) }, t('hist.newPowerline'));
+  }
   if (kind === 'rail') {
     if (pts.length < 2) return;
-    return insertNew('rail', pts.map((p) => [r2(p[0]), r2(p[1]), r2(p[2])]), t('hist.newRail'));
+    // corners rounded with the track radius, like roads with their class radius; on the ground every 4 m
+    const P = resample(filletPath(pts, pts.map((_, i) => (i === 0 || i === pts.length - 1 ? 0 : Math.max(+opts.railR || 0, 0)))), SPACING);
+    return insertNew('rail', P.map((p) => [r2(p[0]), r2(p[1]), r2(ground(p[0], p[1]))]), t('hist.newRail'));
   }
   if (pts.length < 3) return;
   const p2 = pts.map((p) => [r2(p[0]), r2(p[1])]);
@@ -890,7 +988,7 @@ function drawDraft() {
   draft.traverse((o) => o.geometry?.dispose()); draft.clear();
   if (draw?.pts.length) {
     const pts = [...draw.pts, ...(draw.cursor ? [draw.cursor] : [])].map((p) => new THREE.Vector3(p[0], p[1], p[2] + 0.6));
-    if (draw.kind !== 'rail' && draw.kind !== 'road' && pts.length > 2) pts.push(pts[0]);
+    if (draw.kind !== 'rail' && draw.kind !== 'road' && draw.kind !== 'power' && pts.length > 2) pts.push(pts[0]);
     const l = new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), SEL_MAT); l.renderOrder = 10; draft.add(l);
     const d = new THREE.Points(new THREE.BufferGeometry().setFromPoints(pts), HANDLE_MAT); d.renderOrder = 11; draft.add(d);
   }
@@ -984,13 +1082,23 @@ el.addEventListener('pointerdown', (ev) => {
   const K = KINDS[sel.kind];
   const hd = nearestHandle(ev.clientX, ev.clientY);
   if (hd && ev.altKey) {                     // Alt+click a vertex: delete it
-    const min = hd.ring.closed ? 3 : 2;
-    if (hd.ring.pts.length > min) editSel(() => { for (const [pts, i] of linkedVertices(hd).sort((a, b) => b[1] - a[1])) pts.splice(i, 1); }, t('hist.deleteVertex'));
+    removeVertex(hd);
     down = null; return;
   }
   if (!hd && ev.altKey) {                    // Alt+click an edge of the outline: insert a vertex and drag it
     const sg = nearestSegment(ev.clientX, ev.clientY);
-    if (sg) {
+    if (sg && ctrlMode()) {                  // on a line: that point becomes a control point
+      const C0 = controlsOf(sg.ring.pts), j = Math.min(sg.i + (sg.t > 0.5 ? 1 : 0), sg.ring.pts.length - 1);
+      if (!C0.includes(j)) {
+        const C = [...C0, j].sort((a, b) => a - b), k = C.indexOf(j);
+        controls.enabled = false;
+        drag = { type: 'vertex', tx: beginEdit(sel.kind, sel.rec), z: ringZ(sg.ring, j, sg.ring.pts[j]), links: [], label: t('hist.addVertex'),
+          ctrl: { ...ctrlState({ ring: sg.ring }, C), k } };
+        ctrlCache.set(sg.ring.pts, { C, n: sg.ring.pts.length, tol: opts.ctrlTol });
+        live.start(sel.kind, sel.rec);
+        down = null; return;
+      }
+    } else if (sg) {
       const { ring, i, t } = sg, n = ring.pts.length, a = ring.pts[i], b = ring.pts[(i + 1) % n];
       const tx = beginEdit(sel.kind, sel.rec);
       const p = a.map((v, k) => r2(v + (b[k] - v) * t));
@@ -1006,9 +1114,17 @@ el.addEventListener('pointerdown', (ev) => {
   if (hd) {
     controls.enabled = false;
     drag = { type: 'vertex', tx: beginEdit(sel.kind, sel.rec), z: hd.z, links: linkedVertices(hd), label: t('hist.vertex') };
-    // road axes are dense (4 m): neighbouring samples follow the dragged one with a smooth falloff
     const n = hd.ring.pts.length;
-    if (sel.kind === 'edge' && opts.soft > 0 && hd.i > 0 && hd.i < n - 1) {
+    if (CURVES.has(sel.kind)) {
+      activePt = { pts: hd.ring.pts, k: hd.k, i: hd.i };
+      // Shift+drag: up and down instead of across
+      if (ev.shiftKey) drag.vertical = { y0: ev.clientY, z0: hd.p[2] ?? 0, mpp: (2 * camera.position.distanceTo(new THREE.Vector3(hd.p[0], hd.p[1], hd.z)) * Math.tan((camera.fov * Math.PI) / 360)) / el.clientHeight };
+    }
+    if (hd.k !== undefined) {                // a control point: the line bends; an end of a road also takes its node along
+      drag.ctrl = withEnds({ ...ctrlState(hd), k: hd.k }, hd.k);
+      drag.links = [];
+    } else if (CURVES.has(sel.kind) && opts.soft > 0 && hd.i > 0 && hd.i < n - 1) {
+      // all points of a dense line: the neighbours follow the dragged one with a smooth falloff
       drag.soft = { pts: hd.ring.pts, i: hd.i, start: hd.ring.pts.map((q) => [...q]), s: cumLength(hd.ring.pts) };
     }
     live.start(sel.kind, sel.rec);
@@ -1032,6 +1148,23 @@ function onMove(ev) {
   const r = rayAt(ev);
   if (drag?.type === 'vertex') {
     const p = planeHit(r, drag.z); if (!p) return;
+    const v = drag.vertical, dz = v ? (v.y0 - ev.clientY) * v.mpp : 0;
+    if (drag.ctrl) {
+      const c = drag.ctrl, q = c.start[c.C[c.k]];
+      // over the ground, the point keeps its height above it (railways, roads before re-profiling)
+      const to = v ? [q[0], q[1], q[2] + dz] : [p.x, p.y, opts.snap && q.length > 2 ? q[2] + ground(p.x, p.y) - ground(q[0], q[1]) : q[2]];
+      applyReshape(c, { move: c.k, to });
+      live.pending = true;
+      return;
+    }
+    if (v) {                                 // one point (and the soft falloff) up or down
+      const sf = drag.soft;
+      if (sf) sf.pts.forEach((q, j) => { q[2] = r2(sf.start[j][2] + dz * (1 - smoothstep(0, opts.soft, Math.abs(sf.s[j] - sf.s[sf.i])))); });
+      else for (const [pts, i] of drag.links) if (pts[i].length > 2) pts[i][2] = r2(v.z0 + dz);
+      if (sel.kind === 'edge') edgeFlags(sel.rec);
+      live.pending = true;
+      return;
+    }
     if (drag.soft) {
       const { pts, i, start, s } = drag.soft, dx = p.x - start[i][0], dy = p.y - start[i][1], n = pts.length;
       for (let j = 1; j < n - 1; j++) {
@@ -1091,7 +1224,7 @@ function click(ev) {
   const g = groundHit(rayAt(ev));
   if (tool === 'select') { const pk = pick(ev); select(pk.kind, pk.rec); return; }
   if (!g) return;
-  if (tool === 'building' || tool === 'surface' || tool === 'rail' || tool === 'road') {
+  if (tool === 'building' || tool === 'surface' || tool === 'rail' || tool === 'road' || tool === 'power') {
     draw ??= { kind: tool, pts: [] };
     draw.pts.push([g.x, g.y, g.z]);
     drawDraft();
@@ -1116,13 +1249,12 @@ addEventListener('keydown', (ev) => {
     if (ev.code === 'Escape') { draw = null; drawDraft(); return; }
     if (ev.code === 'Backspace') { draw.pts.pop(); if (!draw.pts.length) draw = null; drawDraft(); return; }
   }
-  const tools = ['select', 'road', 'building', 'surface', 'furniture', 'tree', 'wind', 'rail', 'terrain'];
-  if (/^Digit[1-9]$/.test(ev.code)) { setTool(tools[+ev.code.slice(5) - 1]); return; }
+  const tools = ['power', 'select', 'road', 'building', 'surface', 'furniture', 'tree', 'wind', 'rail', 'terrain'];
+  if (/^Digit[0-9]$/.test(ev.code)) { setTool(tools[+ev.code.slice(5)]); return; }
   if (ev.code === 'Escape') { select(null); return; }
   if (ev.code === 'Delete' || ev.code === 'Backspace') {
     if (hover && sel) {
-      const hd = hover, min = hd.ring.closed ? 3 : 2;
-      if (hd.ring.pts.length > min) editSel(() => { for (const [pts, i] of linkedVertices(hd).sort((a, b) => b[1] - a[1])) pts.splice(i, 1); }, t('hist.deleteVertex'));
+      removeVertex(hover);
       hover = null; return;
     }
     deleteSel(); return;
@@ -1134,7 +1266,8 @@ addEventListener('keydown', (ev) => {
   const step = ev.shiftKey ? 10 : 1;
   if (ev.code === 'ArrowLeft') nudgeSel(-step, 0); if (ev.code === 'ArrowRight') nudgeSel(step, 0);
   if (ev.code === 'ArrowUp') nudgeSel(0, step); if (ev.code === 'ArrowDown') nudgeSel(0, -step);
-  if (ev.code === 'PageUp') nudgeSel(0, 0, step); if (ev.code === 'PageDown') nudgeSel(0, 0, -step);
+  if (ev.code === 'PageUp' && !raiseActive(step)) nudgeSel(0, 0, step);
+  if (ev.code === 'PageDown' && !raiseActive(-step)) nudgeSel(0, 0, -step);
   if (ev.code === 'KeyN') { const on = !world.night; world.setNight(on); hemi.intensity = on ? 0.18 : 1.1; sun.intensity = on ? 0.08 : 1.6; }
 });
 
@@ -1144,6 +1277,7 @@ const HINTS = {
   building: 'hint.outline',
   surface: 'hint.outline',
   rail: 'hint.rail',
+  power: 'hint.power',
   road: 'hint.road',
   furniture: 'hint.furniture',
   tree: 'hint.tree', wind: 'hint.wind',
@@ -1164,7 +1298,13 @@ function setTool(name) {
   const box = $('toolopts'); box.innerHTML = '';
   const d = doc?.layers.defs ?? {}, keys = (o) => Object.keys(o ?? {}).sort();
   if (name === 'select') box.append(h('label', {}, t('opt.onGround'), h('input', { type: 'checkbox', checked: opts.snap, onchange: (e) => { opts.snap = e.target.checked; saveOpts(); } })),
+    h('label', { title: t('opt.ctrlPtsTip') }, t('opt.ctrlPts'), h('input', { type: 'checkbox', checked: opts.ctrl, onchange: (e) => { opts.ctrl = e.target.checked; saveOpts(); drawSelection(); } })),
+    h('label', { title: t('opt.ctrlTolTip') }, t('opt.ctrlTol'), h('input', { type: 'number', step: 'any', min: 0.1, value: opts.ctrlTol, onchange: (e) => { opts.ctrlTol = Math.max(+e.target.value || 1.5, 0.1); saveOpts(); drawSelection(); } })),
     optNum(t('opt.softness'), 'soft', { min: 0, title: t('opt.softnessTip') }));
+  if (name === 'rail') box.append(optNum(t('opt.railRadius'), 'railR', { min: 0, title: t('opt.railRadiusTip') }));
+  if (name === 'power') box.append(h('label', {}, t('opt.type'), h('select', { onchange: (e) => { opts.pType = e.target.value; opts.pSpan = POWER_TYPES[opts.pType].span; saveOpts(); setTool('power'); } },
+    Object.keys(POWER_TYPES).map((v) => h('option', { value: v, selected: opts.pType === v }, t(v === 'pole' ? 'power.pole' : 'power.tower'))))),
+    optNum(t('opt.span'), 'pSpan', { min: 10, title: t('opt.spanTip') }));
   if (name === 'building') box.append(optSelect(t('opt.type'), 'bType', keys(d.buildingTypes)), optSelect(t('opt.zone'), 'bZone', keys(d.zones)), optSelect(t('opt.material'), 'bMat', keys(d.materials)), optNum(t('opt.height'), 'bH', { min: 1 }));
   if (name === 'surface') box.append(optSelect(t('opt.cover'), 'sMat', keys(d.surfaces)));
   if (name === 'road') box.append(optSelect(t('opt.class'), 'rCls', keys(doc?.layers.roads?.classes)),
@@ -1202,6 +1342,20 @@ function renderProps() {
     K.rotate ? h('button', { onclick: () => rotateSel(-15), title: 'E' }, '⟳ 15°') : null,
     kind !== 'edge' && kind !== 'node' ? h('button', { onclick: duplicateSel, title: 'Ctrl+D' }, t('common.copy')) : null,
     h('button', { class: 'danger', onclick: deleteSel, title: 'Del' }, t('common.delete'))));
+  const ai = activeIndex();
+  if (ai >= 0) {
+    // the grabbed point of a line: where it is and how high, editable
+    const q = activePt.pts[ai], gz = ground(q[0], q[1]);
+    const num = (i) => h('input', { type: 'number', step: 'any', value: q[i], onchange: (e) => { const to = [...q]; to[i] = +e.target.value; setActivePoint(to); } });
+    el.append(h('div', { class: 'hdr' }, activePt.k !== undefined ? t('props.ctrlPoint', { k: activePt.k + 1, n: controlsOf(activePt.pts).length }) : t('props.vertex', { i: ai })),
+      h('div', { class: 'fields' },
+        h('div', { class: 'field' }, h('label', {}, 'X'), num(0)), h('div', { class: 'field' }, h('label', {}, 'Y'), num(1)),
+        h('div', { class: 'field' }, h('label', { title: t('props.heightTip') }, t('props.height')), num(2)),
+        h('div', { class: 'field' }, h('label', {}, t('props.aboveGround')), h('span', {}, `${(q[2] - gz).toFixed(1)} ${t('common.m')}`))),
+      h('div', { class: 'actions' },
+        h('button', { onclick: () => raiseActive(1), title: 'PgUp' }, '▲ 1 ' + t('common.m')), h('button', { onclick: () => raiseActive(-1), title: 'PgDn' }, '▼ 1 ' + t('common.m')),
+        h('button', { onclick: () => setActivePoint([q[0], q[1], r2(gz)], t('hist.pointHeight')) }, t('props.toGround'))));
+  }
   if (kind === 'building') {
     el.querySelector('.actions').append(
       h('button', { onclick: () => addBlock('top'), title: t('props.blockTopTip') }, t('props.blockTop')),

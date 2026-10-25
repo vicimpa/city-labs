@@ -23,7 +23,7 @@ const call = async (name, args = {}) => {
 const tools = (await client.listTools()).tools.map((t) => t.name);
 ok(tools.length === TOOLS.length && ['map', 'run_script', 'generate', 'new_world'].every((n) => tools.includes(n)), `tools listed: ${tools.join(', ')}`);
 const info = await call('world_info');
-ok(info.counts.building > 4000 && info.counts.edge === 220, `world_info: ${JSON.stringify(info.counts)}`);
+ok(info.counts.building > 3000 && info.counts.powerline === 80 && info.counts.edge === 220, `world_info: ${JSON.stringify(info.counts)}`);
 ok((await call('list_types')).materials.includes('brick'), 'list_types');
 const towers = await call('find', { kind: 'building', where: { type: 'tower', zone: 'downtown' }, limit: 3 });
 ok(towers.total > 0 && towers.items.length <= 3, `find towers downtown: ${towers.total}`);
@@ -48,6 +48,10 @@ const te = await call('terrain_edit', { x: 3000, y: 3000, radius: 60, mode: 'rai
 ok(te.natural_at_centre - hs.natural !== 0, `terrain_edit raise: ${JSON.stringify(te)}`);
 await call('def_set', { group: 'materials', name: 'mcp_red', value: { color: '#ff0000', shininess: 5 } });
 ok((await call('list_types', { group: 'materials' })).mcp_red?.color === '#ff0000', 'def_set');
+const pl = await call('create', { kind: 'powerline', record: { type: 'tower', pts: [[-200, -500], [60, -420], [300, -300]] } });
+ok(pl.index === 80 && (await call('find', { kind: 'powerline' })).total === 81, 'create a power line');
+const plMap = await client.callTool({ name: 'map', arguments: { center: [50, -400], size_m: 700, width: 256, layers: ['terrain', 'power'], highlight: [{ kind: 'powerline', index: 80 }] } });
+ok(!plMap.isError, 'map draws power lines');
 const map = await client.callTool({ name: 'map', arguments: { center: [100, -300], size_m: 800, width: 512, highlight: [{ kind: 'building', index: b.index }] } });
 const legend = JSON.parse(map.content.find((c) => c.type === 'text').text);
 ok(!map.isError && map.content[0].type === 'image' && map.content[0].data.length > 20000 && legend.width === 512 && legend.roads.length > 3, `map renders an image with ${legend.roads.length} numbered roads`);
@@ -76,6 +80,7 @@ const e = doc.layers.roads.edges.find((x) => x.id === road.id);
 ok(e?.name === 'MCP Test Road' && doc.layers.buildings.items[b.index].note === 'by mcp' && doc.layers.defs.materials.mcp_red, 'saved file has the road, the building note and the material');
 ok(doc.layers.buildings.items.filter((x) => x.note2 === 'bulk').length === run.result.n, 'saved file has the script\'s bulk edit');
 ok(doc.layers.furniture.items.some((f) => f.owner === 'e' + road.id), 'the new road placed its delineators');
+ok(doc.layers.buildings.powerlines?.[80]?.pts.length === 3 && doc.layers.buildings.powerlines[80].type === 'tower', 'saved file has the power line');
 fs.rmSync(dir, { recursive: true });
 console.log(fails ? `${fails} FAILED` : 'all MCP headless checks passed');
 process.exit(fails ? 1 : 0);

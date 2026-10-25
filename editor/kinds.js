@@ -73,6 +73,15 @@ export const KINDS = {
     move(r, dx, dy, dz) { movePts(r.pts, dx, dy, dz); },
     rings: (r) => [{ pts: r.pts, closed: !!r.closed, z: (i) => r.pts[i][2] }],
   },
+  // a power line: the posts are the points of its route; pylons and wires are derived (world/power.js)
+  powerline: {
+    get label() { return t('kind.powerline'); }, layer: 'buildings', rebuild: 'cables', list: (L) => (L.buildings.powerlines ??= []),
+    title: (r) => t('kind.powerline.title', { type: r.type ?? 'tower', n: r.pts?.length ?? 0 }), center: (r) => [...mid(r.pts), null],
+    move(r, dx, dy) { movePts(r.pts, dx, dy); },
+    rotate(r, a, cx, cy) { for (const p of r.pts) rot(p, a, cx, cy); roundPts(r.pts); },
+    rings: (r) => [{ pts: r.pts, closed: false, z: null }],
+    search: (r) => `power line ЛЭП ${r.type ?? ''}`,
+  },
   edge: {
     get label() { return t('kind.edge'); }, layer: 'roads', rebuild: 'roads', list: (L) => L.roads.edges,
     title: (r) => `${r.name ?? ''} · ${r.cls} · #${r.id}`, center: (r) => [...mid(r.pts), null],
@@ -119,6 +128,7 @@ export function suggestions(doc, kind, field) {
     'facades.style': ['curtain', 'windows', 'brick', 'ribs'],
     'edge.name': [...new Set((doc.layers.roads?.edges ?? []).map((e) => e.name))].slice(0, 400),
     'fpart.k': ['box', 'cyl', 'ico', 'cone'],
+    'powerline.type': ['tower', 'pole'],
   };
   return S[kind + '.' + field];
 }

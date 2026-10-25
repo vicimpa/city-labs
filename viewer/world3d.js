@@ -6,6 +6,8 @@ import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js
 import { facadeTextures } from './facades.js';
 import { facadeFor } from '../format/world.js';
 import { RoadWorld } from '../world/roadworld.js';
+import { railPiers, elevatedRuns, PIER, GIRDER } from '../world/rail.js';
+import { powerLayout, POWER_TYPES } from '../world/power.js';
 
 const MISSING = 0xff00ff;
 const color = (c) => new THREE.Color(c ?? MISSING);
@@ -33,6 +35,23 @@ export function ribbon(pts, hwid, lift) {
     const nx = -ty * hwid, ny = tx * hwid, p = pts[i];
     pos.set([p[0] + nx, p[1] + ny, p[2] + lift, p[0] - nx, p[1] - ny, p[2] + lift], i * 6);
     if (i < n - 1) { const k = i * 2; idx.push(k, k + 1, k + 3, k, k + 3, k + 2); }
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  g.setIndex(idx);
+  g.computeVertexNormals();
+  return g;
+}
+
+// a box beam hanging under a polyline: sides and bottom, from dz0 down to dz1 below it
+function girder(pts, hw, dz0, dz1) {
+  const n = pts.length, pos = new Float32Array(n * 12), idx = [];
+  for (let i = 0; i < n; i++) {
+    const a = pts[Math.max(i - 1, 0)], b = pts[Math.min(i + 1, n - 1)];
+    let tx = b[0] - a[0], ty = b[1] - a[1]; const L = Math.hypot(tx, ty) || 1; tx /= L; ty /= L;
+    const nx = -ty * hw, ny = tx * hw, p = pts[i], zt = p[2] - dz0, zb = p[2] - dz1;
+    pos.set([p[0] + nx, p[1] + ny, zt, p[0] + nx, p[1] + ny, zb, p[0] - nx, p[1] - ny, zb, p[0] - nx, p[1] - ny, zt], i * 12);
+    if (i < n - 1) for (let f = 0; f < 3; f++) { const k = i * 4 + f, m = k + 4; idx.push(k, m, k + 1, k + 1, m, m + 1); }
   }
   const g = new THREE.BufferGeometry();
   g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
@@ -376,6 +395,7 @@ export class World3D {
     const t = this.L.terrain, [i0, j0, i1, j1] = box;
     this.updateTerrain(i0, j0, i1, j1);
     if (tunnels) { const m = this.terrainMesh.material; this.terrainMesh.material = this.terrainMaterial(); m.dispose(); }
+    this.buildRails(); this.buildCables();         // piers and power posts stand on the ground
     if (this.tileSize === Infinity) { this.buildSurfaces(); return; }
     const xa = t.x0 + i0 * t.res, ya = t.y0 + j0 * t.res, xb = t.x0 + i1 * t.res, yb = t.y0 + j1 * t.res, pad = 400;
     for (let tx = Math.floor((xa - pad) / this.tileSize); tx <= Math.floor((xb + pad) / this.tileSize); tx++)
@@ -557,10 +577,17 @@ export class World3D {
     grp.traverse((o) => o.isMesh && o.geometry.dispose()); grp.clear();
     const bed = new THREE.MeshLambertMaterial({ color: 0x6b645a, side: THREE.DoubleSide });
     const steel = new THREE.MeshPhongMaterial({ color: 0xb8bcc0, shininess: 80, side: THREE.DoubleSide });
+    const concrete = new THREE.MeshLambertMaterial({ color: 0xa8a59e, side: THREE.DoubleSide });
+    const H = this.H ?? (() => 0), piers = [];
     for (const pts of this.L.buildings.rails ?? []) {
       if (this.hidden.has(pts) || pts.length < 2) continue;
       const own = { kind: 'rail', owner: () => pts };
       const b = new THREE.Mesh(ribbon(pts, 2.4, 0.15), bed); b.userData = own; grp.add(b);
+      // above the ground the track is a viaduct: a girder under the bed, carried by piers
+      for (const [i0, i1] of elevatedRuns(pts, H)) {
+        const g = new THREE.Mesh(girder(pts.slice(i0, i1 + 1), GIRDER.hw, -0.1, GIRDER.depth), concrete); g.userData = own; grp.add(g);
+      }
+      for (const q of railPiers(pts, H)) piers.push({ q, pts });
       for (const off of [-0.75, 0.75]) {
         const rp = pts.map((p, i) => {
           const a = pts[Math.max(i - 1, 0)], c = pts[Math.min(i + 1, pts.length - 1)];
@@ -569,6 +596,15 @@ export class World3D {
         });
         const r = new THREE.Mesh(ribbon(rp, 0.09, 0.35), steel); r.userData = own; grp.add(r);
       }
+    }
+    if (piers.length) {
+      const box = new THREE.BoxGeometry(PIER.d, PIER.w, 1); box.translate(0, 0, 0.5);
+      const im = new THREE.InstancedMesh(box, concrete, piers.length);
+      const m4 = new THREE.Matrix4(), q = new THREE.Quaternion(), v = new THREE.Vector3(), sc = new THREE.Vector3(), Z = new THREE.Vector3(0, 0, 1);
+      piers.forEach(({ q: p }, i) => im.setMatrixAt(i, m4.compose(v.set(p.x, p.y, p.z0), q.setFromAxisAngle(Z, p.a), sc.set(1, 1, p.z1 - p.z0))));
+      im.computeBoundingSphere();
+      im.userData = { kind: 'rail', owner: (i) => piers[i].pts };
+      grp.add(im);
     }
   }
 
@@ -655,11 +691,50 @@ export class World3D {
     });
   }
 
-  // ---------------------------------------------------------------- power cables
+  // ---------------------------------------------------------------- power lines: posts + wires derived from the route; loose cables as stored
+  postGeometry(type) {
+    const T = POWER_TYPES[type], parts = [];
+    const box = (w, d, h, z) => { const g = new THREE.BoxGeometry(w, d, h); g.translate(0, 0, z + h / 2); return g; };
+    if (type === 'pole') {
+      const c = new THREE.CylinderGeometry(0.13, 0.17, T.h, 6); c.rotateX(Math.PI / 2); c.translate(0, 0, T.h / 2);
+      parts.push(c, ...T.arms.map(([h, l]) => box(0.15, l * 2, 0.15, h)));
+    } else {
+      // a tower: four legs leaning in to a slim mast, cross-arms tapering to the wire ends, an earth-wire peak
+      const s = T.h / 38, leg = (x0, y0, x1, y1, z0, z1, r) => {
+        const d = new THREE.Vector3(x1 - x0, y1 - y0, z1 - z0), L = d.length(), g = new THREE.CylinderGeometry(r, r, L, 4);
+        g.translate(0, L / 2, 0);              // along +Y from the origin, then turned onto the leg
+        g.applyQuaternion(new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), d.normalize()));
+        g.translate(x0, y0, z0);
+        return g;
+      };
+      const B = 4.2 * s, W = 1.1 * s, z1 = 26 * s;
+      for (const [sx, sy] of [[1, 1], [1, -1], [-1, 1], [-1, -1]]) parts.push(leg(sx * B, sy * B, sx * W, sy * W, 0, z1, 0.32), leg(sx * W, sy * W, sx * 0.5, sy * 0.5, z1, T.h - 1, 0.22));
+      for (const z of [7, 14, 20].map((v) => v * s)) {           // horizontal bracing between the legs
+        const w = B + (W - B) * (z / z1);
+        parts.push(box(0.25, w * 2, 0.25, z), box(w * 2, 0.25, 0.25, z));
+      }
+      for (const [h, l] of T.arms) for (const sy of [1, -1]) parts.push(leg(0, sy * 1, 0, sy * l, h, h + 0.6, 0.35), leg(0, sy * 1, 0, sy * l, h + 2.6, h + 0.6, 0.18));
+    }
+    return mergeGeometries(parts.map((g) => g.index ? g.toNonIndexed() : g));
+  }
   buildCables() {
     const grp = this.groups.cables;
     grp.traverse((o) => o.geometry?.dispose()); grp.clear();
-    const cab = [];
+    const cab = [], H = this.H ?? (() => 0), posts = {};
+    for (const rec of this.L.buildings.powerlines ?? []) {
+      if (this.hidden.has(rec)) continue;
+      const { posts: P, wires } = powerLayout(rec, H);
+      for (const p of P) (posts[POWER_TYPES[rec.type] ? rec.type : 'tower'] ??= []).push({ p, rec });
+      for (const w of wires) for (let i = 0; i + 1 < w.length; i++) cab.push(...w[i], ...w[i + 1]);
+    }
+    const m4 = new THREE.Matrix4(), q = new THREE.Quaternion(), v = new THREE.Vector3(), one = new THREE.Vector3(1, 1, 1), Z = new THREE.Vector3(0, 0, 1);
+    for (const [type, list] of Object.entries(posts)) {
+      const im = new THREE.InstancedMesh(this.postGeometry(type), new THREE.MeshLambertMaterial({ color: type === 'pole' ? 0x6b5640 : 0x8d9296 }), list.length);
+      list.forEach(({ p }, i) => im.setMatrixAt(i, m4.compose(v.set(p.x, p.y, p.z), q.setFromAxisAngle(Z, p.a), one)));
+      im.computeBoundingSphere();
+      im.userData = { kind: 'powerline', owner: (i) => list[i].rec };
+      grp.add(im);
+    }
     for (const c of this.L.buildings.cables ?? []) if (!this.hidden.has(c)) for (let i = 0; i + 1 < c.length; i++) cab.push(...c[i], ...c[i + 1]);
     const cg = new THREE.BufferGeometry(); cg.setAttribute('position', new THREE.Float32BufferAttribute(cab, 3));
     const lines = new THREE.LineSegments(cg, new THREE.LineBasicMaterial({ color: 0x2a2d30 }));

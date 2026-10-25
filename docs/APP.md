@@ -50,7 +50,7 @@ The tools are defined once in `mcp/ops.js`, against an abstract session, and are
 | `world_info` | file, unsaved state, counts per kind, extent, registry sizes, plus the record shapes |
 | `list_types` | type registry entries (materials, building types, zones, surfaces, prefabs, road classes) |
 | `find` | records of a kind filtered by fields (`=`, `contains`, `in`, `min/max`), `near`, `bbox` |
-| `get` / `update` / `create` / `delete` | one record by kind + index (or id for roads and nodes) |
+| `get` / `update` / `create` / `delete` | one record by kind + index (or id for roads and nodes); kinds include `rail` and `powerline` |
 | `transform` | move / rotate, optionally onto the ground |
 | `road_add` | lays a road through points; its ends attach to nodes or split the road they land on |
 | `road_reprofile` | re-levels a road over the natural ground |
@@ -70,8 +70,8 @@ call, as it is for edits made by hand.
 ### Maps
 
 `map` draws the area from the data: shaded terrain, water, ground patches, roads (a dark edge marks a
-bridge, a dashed line a tunnel), buildings coloured by material, rails, trees and a grid labelled
-in metres. Markers on the longest visible roads are explained in the text part of the result
+bridge, a dashed line a tunnel), buildings coloured by material, rails, power lines, trees and a grid
+labelled in metres. Markers on the longest visible roads are explained in the text part of the result
 (number → road id and name), along with the scale. Give `center` + `size_m` or a `bbox`; with
 neither, it draws the whole map. `highlight` outlines records in magenta.
 
@@ -106,6 +106,40 @@ that list, and its centre fields default to the point the camera looks at. MCP `
 
 To add a generator, give it an entry in `GENERATORS`, plus `gen.<id>`, `gen.<id>.help` and
 `gen.p.<param>` in both locales.
+
+## Lines: control points, heights, railways and power lines
+
+- **Control points.** Roads, railways and train routes are dense (a point every 4–8 m). With
+  **control points** on (Select tool options), only the points that carry the shape get handles,
+  about one per 50 m. They are found by simplifying the line within the **control tolerance**.
+  - **Drag** one and the line bends smoothly up to the second control point on each side; the rest
+    of the line stays exactly where it was.
+  - **Alt+click** the line to add a control point there.
+  - **Alt+click** a control point (or **Del** while hovering it) to remove it. The stretch between
+    its neighbours becomes a smooth curve through them.
+  - Turn the option off to edit every point. Neighbours then follow with the **axis falloff**.
+
+  The code is in `world/spline.js`.
+- **Heights.** **Shift+drag** a point to move it up or down; **PgUp / PgDn** raise or lower the
+  grabbed point by 1 m (with Shift, 10 m). The Properties tab shows that point's X, Y, Z and its
+  height above the ground, all editable, plus **To ground**.
+  - On a road, the bridge and tunnel flags are recomputed from the new levels, so raising a road
+    turns it into a bridge with piers.
+  - Moving the end of a road moves its junction too, and the other roads there bend over their
+    first 40 m.
+- **Railways.** The Railway tool rounds the corners you click with a **radius** (default 300 m)
+  and lays the track on the ground every 4 m. Where the track runs more than 2.5 m above the
+  ground, a viaduct is derived: a girder under the bed, with piers every 36 m (`world/rail.js`).
+- **Power lines** (tool **Power line**, key 0) are records `{type: 'tower' | 'pole', pts}`, one
+  point per post.
+  - Click the corners of the route. Posts in between are spaced evenly, no further apart than the
+    **span** (towers 320 m, poles 50 m).
+  - The posts stand on the ground, face along the line, and carry wires that sag between them
+    (`world/power.js`).
+  - Moving a post re-strings the line. MCP creates and edits them as kind `powerline`.
+
+`tools/migrate_structures.mjs` converted the sample city's stored rail piers, pylons, poles and
+their cables into this derived form.
 
 ## Export and facades
 
