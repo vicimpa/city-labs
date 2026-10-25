@@ -143,3 +143,7 @@ apps read.
 (`app/boot/`). Installed apps will then offer the installer. Everything else, including
 `app/main.mjs`, `app/preload.cjs`, the editor and `world/`, ships in the code bundle and updates
 itself.
+
+## License
+
+[MIT](LICENSE) © 2026 vicimpa

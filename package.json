@@ -49,5 +49,6 @@
     "type": "git",
     "url": "https://github.com/vicimpa/city-labs.git"
   },
-  "author": "vicimpa"
+  "author": "vicimpa",
+  "license": "MIT"
 }
