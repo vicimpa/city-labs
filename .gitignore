@@ -8,7 +8,6 @@ city/out/
 city/data/unpacked/
 city/data/*.json
 !city/data/drive_issues.json
-!city/data/issues.json
 test-results/
 # CC0 Poly Haven textures/HDRIs from the Blender era (re-downloadable, unused by the web renderer)
 city/assets/

@@ -1,5 +1,5 @@
 // Road geometry: carriageways, curbs, sidewalks, junction pads, markings, barriers, bents and
-// tunnels (port of city/vespera/roadmesh.py). Output: per owner { material: { v: number[], i: number[] } }.
+// tunnels (port of the Python generator's roadmesh.py, see the first git commit). Output: per owner { material: { v: number[], i: number[] } }.
 import { unit, leftNormal, interp, searchsorted, linspace, tangents, lineIntersect, cumLength, resampleN, roundHalfEven } from './geom.js';
 import { RoadIndex, tangentAt, URBAN } from './roadnet.js';
 

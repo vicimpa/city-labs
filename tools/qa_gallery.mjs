@@ -1,8 +1,9 @@
-// Screenshot every issue from city/data/issues.json into city/docs/qa/ + index.html
+// Screenshot every issue of the world's `issues` layer into city/docs/qa/ + index.html
 import { chromium } from 'playwright';
 import fs from 'fs';
+import { decode } from '../format/vspb.js';
 const per = Number(process.argv[2] ?? 12);
-const issues = JSON.parse(fs.readFileSync('city/data/issues.json')).items.filter(i => i.p[0] || i.p[1]);
+const issues = ((await decode(fs.readFileSync('city/data/vespera.vspb'))).layers.issues?.items ?? []).filter(i => i.p[0] || i.p[1]);
 const byRule = {};
 for (const it of issues) (byRule[it.rule] ??= []).push(it);
 const out = 'city/docs/qa'; fs.rmSync(out, { recursive: true, force: true }); fs.mkdirSync(out, { recursive: true });

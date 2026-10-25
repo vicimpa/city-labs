@@ -1,4 +1,4 @@
-// 2D polyline helpers (port of city/vespera/geom.py). Points are [x, y] arrays; numbers are metres.
+// 2D polyline helpers (port of the Python generator's geom.py, see the first git commit). Points are [x, y] arrays; numbers are metres.
 
 export const unit = (v) => { const n = Math.max(Math.hypot(v[0], v[1]), 1e-9); return [v[0] / n, v[1] / n]; };
 export const leftNormal = (t) => [-t[1], t[0]];
