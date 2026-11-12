@@ -3,6 +3,7 @@
 // the rest are rebuilt whole.
 import { edgesAt, followEnd } from './roadedit.js';
 import { t } from './i18n.js';
+import { buildingCenter, ensureLocalBuilding, moveObject, rotateObject, scaleObject } from '../format/transforms.js';
 
 const bbox2 = (pts) => {
   let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
@@ -18,19 +19,17 @@ const r2 = (v) => Math.round(v * 100) / 100;
 const movePts = (pts, dx, dy, dz = 0) => { for (const p of pts) { p[0] = r2(p[0] + dx); p[1] = r2(p[1] + dy); if (p.length > 2 && dz) p[2] = r2(p[2] + dz); } };
 const roundPts = (pts) => { for (const p of pts) { p[0] = r2(p[0]); p[1] = r2(p[1]); } };
 
-const polyKind = (o) => ({ ...o, closed: true });
+const polyKind = (o) => Object.assign(o, { closed: true }); // preserve the live locale getter
 export const KINDS = {
   building: {
     get label() { return t('kind.building'); }, layer: 'buildings', rebuild: 'blocks', list: (L) => L.buildings.items,
     title: (r) => `${r.type ?? '?'} · ${r.zone ?? ''} · ` + t('kind.building.parts', { n: r.parts?.length ?? 0 }),
-    center(r) {
-      const all = (r.parts ?? []).flatMap((p) => p.p ?? []);
-      const [x, y] = mid(all.length ? all : [[0, 0]]);
-      return [x, y, r.parts?.length ? Math.min(...r.parts.map((p) => p.z ?? 0)) : 0];
-    },
-    move(r, dx, dy, dz) { for (const p of r.parts ?? []) { movePts(p.p, dx, dy); for (const h of p.holes ?? []) movePts(h, dx, dy); p.z = r2((p.z ?? 0) + dz); } },
-    rotate(r, a, cx, cy) { for (const p of r.parts ?? []) { for (const q of p.p) rot(q, a, cx, cy); roundPts(p.p); for (const h of p.holes ?? []) { for (const q of h) rot(q, a, cx, cy); roundPts(h); } } },
-    rings: (r) => (r.parts ?? []).flatMap((p) => [p.p, ...(p.holes ?? [])].map((pts) => ({ pts, closed: true, z: () => (p.z ?? 0) + (p.h ?? 0) }))),
+    center: buildingCenter,
+    normalize: ensureLocalBuilding,
+    move(r, dx, dy, dz) { moveObject('building', r, dx, dy, dz); },
+    rotate(r, a, cx, cy) { rotateObject('building', r, a, cx, cy); },
+    scale(r, s) { scaleObject('building', r, s); },
+    rings: (r) => (r.parts ?? []).flatMap((p) => [p.p, ...(p.holes ?? [])].map((pts) => ({ pts, closed: true, local: r, z: () => (p.z ?? 0) + (p.h ?? 0) }))),
     linked: true,                         // a vertex shared by stacked parts moves in all of them
     search: (r) => `${r.type} ${r.zone}`,
   },
@@ -47,8 +46,9 @@ export const KINDS = {
     get label() { return t('kind.furniture'); }, layer: 'furniture', rebuild: 'furniture', list: (L) => L.furniture.items,
     title: (r) => `${r.t ?? '?'}`,
     center: (r) => [r.p[0], r.p[1], r.p[2]],
-    move(r, dx, dy, dz) { r.p = [r2(r.p[0] + dx), r2(r.p[1] + dy), r2(r.p[2] + dz)]; },
-    rotate(r, a) { r.h = Math.round(((r.h ?? 0) + a) * 1000) / 1000; },
+    move(r, dx, dy, dz) { moveObject('furniture', r, dx, dy, dz); },
+    rotate(r, a, cx, cy) { rotateObject('furniture', r, a, cx, cy); },
+    scale(r, s) { scaleObject('furniture', r, s); },
     search: (r) => `furniture ${r.t}`,
   },
   tree: {

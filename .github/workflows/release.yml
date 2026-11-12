@@ -1,73 +1,97 @@
-# Push a tag vX.Y.Z (= package.json version) to publish a release:
-# installers for macOS / Windows / Linux, the code bundle app-X.Y.Z.asar for hot updates,
-# and manifest.json, which installed apps read from the latest release.
 name: Release
-
 on:
   push:
     tags: ['v*']
-
 permissions:
-  contents: write
-
+  contents: read
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 jobs:
+  checks:
+    uses: ./.github/workflows/ci.yml
+    with:
+      skip_desktop: true
   build:
+    needs: checks
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: macos-latest
-            target: --mac --arm64 --x64
+            target: aarch64-apple-darwin
+            node_arch: arm64
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            node_arch: x64
           - os: windows-latest
-            target: --win --x64
-          - os: ubuntu-latest
-            target: --linux --x64
+            target: x86_64-pc-windows-msvc
+            node_arch: x64
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            node_arch: x64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 24
+          architecture: ${{ matrix.node_arch }}
           cache: npm
-      - name: Tag matches package.json
-        shell: bash
-        run: test "v$(node -p "require('./package.json').version")" = "$GITHUB_REF_NAME"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential libxdo-dev libssl-dev librsvg2-dev libayatana-appindicator3-dev patchelf
       - run: npm ci
+      - name: Verify release version
+        run: node -e "if ('v'+require('./package.json').version !== process.env.GITHUB_REF_NAME) process.exit(1)"
       - run: npm run build:app
-      - name: Installers
-        run: npx electron-builder ${{ matrix.target }} --publish never
-      - uses: actions/upload-artifact@v4
+        env:
+          TAURI_ENV_TARGET_TRIPLE: ${{ matrix.target }}
+      - run: npm run test:app
+      - run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
+      - run: cargo test --manifest-path src-tauri/Cargo.toml --locked
+      - run: cargo clippy --manifest-path src-tauri/Cargo.toml --locked -- -D warnings
+      - uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          name: installers-${{ matrix.os }}
-          path: |
-            release/City-Labs-*.dmg
-            release/City-Labs-*.exe
-            release/City-Labs-*.AppImage
-          if-no-files-found: error
-      - if: matrix.os == 'ubuntu-latest'
-        uses: actions/upload-artifact@v4
-        with:
-          name: bundle
-          path: release/app-*.asar
-          if-no-files-found: error
-
+          tagName: ${{ github.ref_name }}
+          releaseName: City Labs ${{ github.ref_name }}
+          releaseBody: Installers are being built. Release notes and checksums are added after all platforms pass.
+          releaseDraft: true
+          prerelease: false
+          uploadUpdaterJson: false
+          retryAttempts: 2
+          args: --target ${{ matrix.target }}
+      - name: Verify packaged macOS bridge
+        if: runner.os == 'macOS'
+        run: npm run test:app
+        env:
+          VSPB_TEST_APP_CONTENTS: ${{ github.workspace }}/src-tauri/target/${{ matrix.target }}/release/bundle/macos/City Labs.app/Contents
   publish:
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-      - uses: actions/download-artifact@v4
-        with:
-          path: dist
-          merge-multiple: true
-      - name: Update manifest
-        run: node tools/release-manifest.mjs dist
-      - name: GitHub release
+      - name: Publish verified installers
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "$GITHUB_REF_NAME" dist/* \
-            --title "City Labs ${GITHUB_REF_NAME#v}" --generate-notes
+          gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --dir "$RUNNER_TEMP/release-assets"
+          node tools/release.mjs checksums "$RUNNER_TEMP/release-assets"
+          gh release upload "$GITHUB_REF_NAME" "$RUNNER_TEMP/release-assets/SHA256SUMS" --repo "$GITHUB_REPOSITORY" --clobber
+          node tools/release.mjs notes > "$RUNNER_TEMP/release-notes.md"
+          gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft=false --latest --notes-file "$RUNNER_TEMP/release-notes.md"

@@ -9,7 +9,7 @@ const out = path.resolve(root, process.argv[2] ?? 'dist-web');
 const t0 = Date.now();
 // root = editor/, so index.html lands at the site root; relative URLs work under any sub-path
 await build({ configFile: false, root: path.join(root, 'editor'), base: './', logLevel: 'warn', publicDir: false,
-  build: { outDir: out, emptyOutDir: true, chunkSizeWarningLimit: 4000 } });
+  build: { target: 'esnext', outDir: out, emptyOutDir: true, chunkSizeWarningLimit: 4000 } });
 fs.mkdirSync(path.join(out, 'samples'), { recursive: true });
 fs.copyFileSync(path.join(root, 'city/data/vespera.vspb'), path.join(out, 'samples/vespera.vspb'));
 fs.writeFileSync(path.join(out, '.nojekyll'), '');

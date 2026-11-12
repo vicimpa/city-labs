@@ -1,6 +1,5 @@
 // Procedural facade textures (canvas), generated from the parameters in defs.facades. One tile =
-// 8 bays × 8 floors, mapped in metres through the world-space UVs ExtrudeGeometry gives side walls
-// (u along the wall, v = height). Colours are multiplied by the material colour, so light walls
+// 8 bays × 8 floors, mapped in local metres by buildings.js (u = wall arc length, v = height). Colours are multiplied by the material colour, so light walls
 // take the building's colour; the emissive map holds the lit windows.
 import * as THREE from 'three';
 
@@ -17,7 +16,8 @@ const css = (c, k = 1) => `rgb(${c.map((v) => Math.max(0, Math.min(255, Math.rou
 export function facadeCanvases(params, size = N * PX) {
   const p = { ...FACADE_DEFAULTS, ...params };
   const mk = () => { const c = typeof OffscreenCanvas !== 'undefined' && !globalThis.document ? new OffscreenCanvas(size, size) : document.createElement('canvas'); c.width = c.height = size; return c; };
-  const color = mk(), emis = mk(), g = color.getContext('2d'), ge = emis.getContext('2d'), r = rng(p.seed * 977 + 13), px = size / N;
+  const color = mk(), emis = mk(), relief = mk(), g = color.getContext('2d'), ge = emis.getContext('2d'), gb = relief.getContext('2d'), r = rng(p.seed * 977 + 13), px = size / N;
+  gb.fillStyle = '#a0a0a0'; gb.fillRect(0, 0, size, size);
   ge.fillStyle = '#000'; ge.fillRect(0, 0, size, size);
   const wall = rgb(p.wallColor), frame = rgb(p.frame), glass = rgb(p.glass);
   const [ww, wh] = Array.isArray(p.window) ? p.window : [p.window, p.window];
@@ -50,18 +50,22 @@ export function facadeCanvases(params, size = N * PX) {
         win = [wx, wy, w, h];
       }
     }
+    if (win) {
+      gb.fillStyle = '#d0d0d0'; gb.fillRect(win[0] - 2, win[1] - 2, win[2] + 4, win[3] + 4);
+      gb.fillStyle = '#505050'; gb.fillRect(...win);
+    }
     if (win && r() < p.lit) {                         // lit window, warm or cool
       const k = 0.55 + r() * 0.45, warm = r() < p.warm;
       ge.fillStyle = warm ? `rgb(${255 * k | 0},${200 * k | 0},${120 * k | 0})` : `rgb(${190 * k | 0},${220 * k | 0},${255 * k | 0})`;
       ge.fillRect(...win); lit++;
     }
   }
-  return { color, emissive: lit ? emis : null, params: p };
+  return { color, emissive: lit ? emis : null, relief, params: p };
 }
 
-function toTexture(canvas, p, anisotropy) {
+function toTexture(canvas, p, anisotropy, colorData = true) {
   const t = new THREE.CanvasTexture(canvas);
-  t.wrapS = t.wrapT = THREE.RepeatWrapping; t.anisotropy = anisotropy; t.colorSpace = THREE.SRGBColorSpace;
+  t.wrapS = t.wrapT = THREE.RepeatWrapping; t.anisotropy = anisotropy; t.colorSpace = colorData ? THREE.SRGBColorSpace : THREE.NoColorSpace;
   t.repeat.set(1 / (N * p.bay), 1 / (N * p.floor));
   return t;
 }
@@ -69,15 +73,19 @@ function toTexture(canvas, p, anisotropy) {
 /** Textures for every facade in the registry: name -> { map, emissiveMap }. Pass `into` to update in place. */
 export function facadeTextures(facades, anisotropy = 4, into = {}) {
   for (const [name, params] of Object.entries(facades ?? {})) {
-    const c = facadeCanvases(params), cur = into[name];
-    if (cur) {
-      cur.map.image = c.color; cur.map.repeat.set(1 / (N * c.params.bay), 1 / (N * c.params.floor)); cur.map.needsUpdate = true;
-      if (c.emissive) {
-        if (cur.emissiveMap) { cur.emissiveMap.image = c.emissive; cur.emissiveMap.repeat.copy(cur.map.repeat); cur.emissiveMap.needsUpdate = true; }
-        else cur.emissiveMap = toTexture(c.emissive, c.params, anisotropy);
-      } else cur.emissiveMap = null;
-    } else into[name] = { map: toTexture(c.color, c.params, anisotropy), emissiveMap: c.emissive ? toTexture(c.emissive, c.params, anisotropy) : null };
+    const c = facadeCanvases(params), cur = into[name] ?? (into[name] = {});
+    for (const [key, canvas, colorData] of [['map', c.color, true], ['emissiveMap', c.emissive, true], ['bumpMap', c.relief, false]]) {
+      if (!canvas) { cur[key]?.dispose(); cur[key] = null; continue; }
+      if (cur[key]) {
+        cur[key].image = canvas;
+        cur[key].repeat.set(1 / (N * c.params.bay), 1 / (N * c.params.floor));
+        cur[key].needsUpdate = true;
+      } else cur[key] = toTexture(canvas, c.params, anisotropy, colorData);
+    }
   }
-  for (const name of Object.keys(into)) if (!facades?.[name]) delete into[name];
+  for (const name of Object.keys(into)) if (!facades?.[name]) {
+    for (const t of new Set(Object.values(into[name]))) t?.dispose();
+    delete into[name];
+  }
   return into;
 }

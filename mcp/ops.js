@@ -12,11 +12,13 @@ import { renderMap, encodePng, MAP_LAYERS } from './map.js';
 import { t } from '../editor/i18n.js';
 import { runScript, SCRIPT_API } from './script.js';
 import { runGenerator, describeGenerators } from './generators.js';
+import { transformRecord, assignMaterial, roadControls, editRoadControl } from '../editor/commands.js';
+import { validateDefChange } from '../format/validate.js';
 
 const KIND_DOC = `Record kinds and their shape:
-- building: {type, zone, parts:[{p:[[x,y],...] outline, holes?, z base height, h height, m material}]} (no id, addressed by index)
+- building: {type, zone, transform:{p:[x,y,z],r:[rx,ry,rz],s:[sx,sy,sz]}, parts:[{p:[[x,y],...] LOCAL outline, holes?, z LOCAL base, h height, m material, roofMaterial?, trimMaterial?}]} (no id, addressed by index). Euler XYZ radians; positive scale. Legacy records without transform are imported from world coordinates once.
 - surface: ground patch {p:[[x,y],...], holes?, m surface material}
-- furniture: {t prefab, p:[x,y,z], h heading rad, owner?} — owner 'e<id>'/'n<id>' marks items the road rules place (regenerated when that road changes)
+- furniture: {t prefab, p:[x,y,z], h heading rad, scale?:[sx,sy,sz], tilt?:[rx,ry], owner?} — owner 'e<id>'/'n<id>' marks items the road rules place (regenerated when that road changes)
 - tree: [x,y,z]; wind: wind turbine [x,y,z,0]; train: {pts, closed}
 - rail: railway track polyline [[x,y,z],...] (z = track level; where it runs >2.5 m above the ground, piers and a viaduct girder are derived)
 - powerline: {type: 'tower' | 'pole', pts: [[x,y],...]} — one point per post (towers ~320 m apart, poles ~50 m); posts stand on the ground, wires are derived
@@ -127,7 +129,7 @@ export const TOOLS = [
     run(s, a) {
       const rec = resolve(s, a);
       s.edit(a.kind, rec, (r) => {
-        if (a.value !== undefined) { if (!Array.isArray(r)) throw new Error('value replaces array records only; use set'); r.length = 0; r.push(...a.value); }
+        if (a.value !== undefined) { if (!Array.isArray(r)) throw new Error('value replaces array records only; use set'); r.length = 0; for (const value of a.value) r.push(structuredClone(value)); }
         if (a.set) { if (Array.isArray(r)) throw new Error('this kind is an array record; use value'); Object.assign(r, structuredClone(a.set)); }
         for (const k of a.unset ?? []) delete r[k];
       }, t('mcp.edit', { what: s.kinds[a.kind].label }));
@@ -162,29 +164,47 @@ export const TOOLS = [
   {
     name: 'transform', title: 'Move / rotate a record',
     description: 'Move a record by (dx, dy, dz) metres and/or rotate it about its centre (buildings, surfaces, furniture). ground:true sets buildings / furniture / trees / turbines onto the graded terrain afterwards. Moving a node bends the roads that end at it; moving a road moves its nodes.',
-    schema: (z) => ({ ...ref(z), dx: z.number().optional(), dy: z.number().optional(), dz: z.number().optional(), rotate_deg: z.number().optional(), ground: z.boolean().optional() }),
+    schema: (z) => ({ ...ref(z), dx: z.number().optional(), dy: z.number().optional(), dz: z.number().optional(), rotate_deg: z.number().optional(), scale: z.union([z.number().positive(), z.array(z.number().positive()).length(3)]).optional(), ground: z.boolean().optional() }),
     run(s, a) {
       const rec = resolve(s, a), K = s.kinds[a.kind];
-      s.edit(a.kind, rec, (r) => {
-        if (a.dx || a.dy || a.dz) K.move(r, a.dx ?? 0, a.dy ?? 0, a.dz ?? 0, s.doc.layers);
-        if (a.rotate_deg) { if (!K.rotate) throw new Error(`${a.kind} cannot rotate`); const [cx, cy] = K.center(r); K.rotate(r, (a.rotate_deg * Math.PI) / 180, cx, cy); }
-        if (a.ground && ['building', 'furniture', 'tree', 'wind'].includes(a.kind)) { const [x, y, z] = K.center(r); K.move(r, 0, 0, Math.max(s.graded(x, y), 0) - z, s.doc.layers); }
-      }, t('mcp.move', { what: K.label }));
+      s.edit(a.kind, rec, (r) => transformRecord(s.doc, a.kind, r, a, s.graded), t('mcp.move', { what: K.label }));
       return summary(s, a.kind, rec, list(s, a.kind).indexOf(rec));
+    },
+  },
+  {
+    name: 'material_assign', title: 'Assign an object material',
+    description: 'Assign an existing shared material to a building (default kind) or furniture prop. Buildings: all parts, or one part; slot is m (walls), roofMaterial or trimMaterial. Props: whole-object override. Same operation as the UI, with undo.',
+    schema: (z) => ({ kind: z.enum(['building', 'furniture']).optional(), index: z.number().int().nonnegative(), material: z.string(), part: z.number().int().nonnegative().optional(), slot: z.enum(['m', 'roofMaterial', 'trimMaterial']).optional() }),
+    run(s, a) {
+      const kind = a.kind ?? 'building', rec = resolve(s, { kind, index: a.index });
+      s.edit(kind, rec, (r) => assignMaterial(s.doc, r, a.material, a), `Material ${a.material}`);
+      return summary(s, kind, rec, a.index);
     },
   },
   {
     name: 'road_add', title: 'Lay a new road',
     description: 'Lay a road through control points [[x,y],...] (corners rounded with the class radius, resampled every 4 m). Each end attaches to a node within ~15 m, or splits a road it lands on into a T-junction, or gets a new end node. The road gets a vertical profile over the natural ground; asphalt, junction pads, lamps and terrain grading follow. cls: a key of roads.classes (street, avenue, boulevard, lane, rural, mountain, industrial, fw12, fw13, ramp1…).',
-    schema: (z) => ({ points: z.array(z.array(z.number()).min(2)).min(2), cls: z.string(), name: z.string().optional() }),
-    run(s, { points, cls, name }) {
+    schema: (z) => ({ points: z.array(z.array(z.number()).min(2)).min(2), cls: z.string(), name: z.string().optional(), elevation: z.number().optional().describe('Metres above/below the terrain profile'), snap: z.boolean().optional(), verticalTolerance: z.number().nonnegative().optional() }),
+    run(s, { points, cls, name, ...options }) {
       if (!s.doc.layers.roads?.classes?.[cls]) throw new Error(`unknown road class '${cls}'`);
-      const res = addRoad(s.doc, s.natural, points, cls, name ?? '');
+      const res = addRoad(s.doc, s.natural, points, cls, name ?? '', options);
       if (!res) throw new Error('could not lay the road (too short, or both ends on one node)');
       s.roadTx(res.tx, t('mcp.newRoad'));
       const e = res.edge;
       return { id: e.id, name: e.name, nodes: e.n, points: e.pts.length, length_m: Math.round((e.pts.length - 1) * 4) };
     },
+  },
+  {
+    name: 'road_controls', title: 'Get road control points',
+    description: 'Get the editable control-point set of a road in metres. Use road_edit_control with these control indices instead of dense samples. Endpoints share graph nodes.',
+    schema: (z) => ({ id: z.number().int(), tolerance: z.number().positive().optional() }),
+    run(s, { id, tolerance }) { const rec = resolve(s, { kind: 'edge', id }); return { id, ...roadControls(rec, tolerance) }; },
+  },
+  {
+    name: 'road_edit_control', title: 'Edit a road control point',
+    description: 'Move, insert (after index) or remove a control point and resample smoothly. Moving an endpoint moves its node and bends connected roads. One undo step; generated meshes, flags and terrain follow.',
+    schema: (z) => ({ id: z.number().int(), action: z.enum(['move', 'insert', 'remove']), index: z.number().int().nonnegative(), point: z.array(z.number()).length(3).optional(), tolerance: z.number().positive().optional() }),
+    run(s, a) { const rec = resolve(s, { kind: 'edge', id: a.id }); s.edit('edge', rec, (r) => editRoadControl(s.doc, r, a), `Road ${a.action} control`); return { id: a.id, ...roadControls(rec, a.tolerance) }; },
   },
   {
     name: 'road_reprofile', title: 'Re-level a road',
@@ -233,16 +253,16 @@ export const TOOLS = [
     name: 'def_set', title: 'Set a registry entry',
     description: 'Create or replace a type registry entry (value object), or delete it (value null). Groups: materials {color "#rrggbb", shininess, specular, glow, nightGlow, facade wall|curtain|brick|ribs|""}, buildingTypes {wall office|house|""}, zones {color}, surfaces {color, lift}, furniture {parts:[{k box|cyl|ico|cone, s:[w,d,h] | r, h, at:[x,y,z], c "#rrggbb"}]}, roadMaterials {color}, roadClasses {color}, roads.classes {lanes, lane_w, shoulder, median, side, corner, prio, r, sigma, max_grade, k_min, oneway}.',
     schema: (z) => ({ group: z.string(), name: z.string(), value: z.any().nullable() }),
-    run(s, { group, name, value }) { s.setDef(group, name, value === null ? null : structuredClone(value)); return { group, name, deleted: value === null }; },
+    run(s, { group, name, value }) { validateDefChange(s.doc, group, name, value); s.setDef(group, name, value === null ? null : structuredClone(value)); return { group, name, deleted: value === null }; },
   },
   {
     name: 'new_world', title: 'Start a new empty map',
     description: 'Replace the open world with a new empty map: flat land of width_m × depth_m metres (250–64000; `size_m` sets both) at `ground` metres, no roads or buildings, the default type registry. The grid step is res_m, or chosen automatically to keep the heightfield within ~4 M cells. Refused while there are unsaved changes unless force is true. Follow with generate (terrain, streets, buildings, trees) to fill it.',
     schema: (z) => ({ size_m: z.number().min(250).max(64000).optional(), width_m: z.number().min(250).max(64000).optional(), depth_m: z.number().min(250).max(64000).optional(),
       res_m: z.number().positive().optional(), ground: z.number().optional(), force: z.boolean().optional() }),
-    run(s, a) {
+    async run(s, a) {
       const width = a.width_m ?? a.size_m ?? 4000, depth = a.depth_m ?? a.size_m ?? width;
-      s.newWorld({ width, depth, res: a.res_m ?? 'auto', ground: a.ground ?? 10 }, !!a.force);
+      await s.newWorld({ width, depth, res: a.res_m ?? 'auto', ground: a.ground ?? 10 }, !!a.force);
       const t0 = s.doc.layers.terrain;
       return { width_m: width, depth_m: depth, res_m: t0.res, cells: t0.nx * t0.ny, ...s.info() };
     },

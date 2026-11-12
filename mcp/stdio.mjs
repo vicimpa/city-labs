@@ -16,26 +16,31 @@ export const APP_PORT = +(process.env.VSPB_MCP_PORT ?? 7357);
 const file = path.resolve(process.argv[2] ?? 'city/data/vespera.vspb');
 const session = new FileSession(file);
 const real = (p) => { try { return fs.realpathSync(p); } catch { return p; } };
+const authorization = process.env.VSPB_MCP_TOKEN ? { authorization: `Bearer ${process.env.VSPB_MCP_TOKEN}` } : {};
 
 // is the app running with this file open?
 async function app() {
   try {
-    const r = await fetch(`http://127.0.0.1:${APP_PORT}/health`, { signal: AbortSignal.timeout(400) });
+    const r = await fetch(`http://127.0.0.1:${APP_PORT}/health`, { headers: authorization, signal: AbortSignal.timeout(400) });
     const j = await r.json();
     return j.app === 'vespera-editor' && j.file && real(j.file) === real(file);
   } catch { return false; }
 }
 
 const server = new McpServer({ name: 'vespera', version: '1.0.0' });
+// One document/history per process: asynchronous scripts, loads and saves must
+// not interleave two clients' transactions.
+let queue = Promise.resolve();
+const serialized = (fn) => { const result = queue.then(fn, fn); queue = result.catch(() => {}); return result; };
 for (const tool of TOOLS) {
-  server.registerTool(tool.name, { title: tool.title, description: tool.description, inputSchema: tool.schema(z) }, async (args) => {
+  server.registerTool(tool.name, { title: tool.title, description: tool.description, inputSchema: tool.schema(z) }, (args) => serialized(async () => {
     if (await app()) {
-      const r = await fetch(`http://127.0.0.1:${APP_PORT}/tool`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: tool.name, args }) });
+      const r = await fetch(`http://127.0.0.1:${APP_PORT}/tool`, { method: 'POST', headers: { 'content-type': 'application/json', ...authorization }, body: JSON.stringify({ name: tool.name, args }), signal: AbortSignal.timeout(125000) });
       return await r.json();
     }
     await session.ready();
     return runTool(session, tool.name, args);
-  });
+  }));
 }
 await server.connect(new StdioServerTransport());
 console.error(`vespera mcp: ${file} (forwarding to the editor app on :${APP_PORT} when it has this file open)`);

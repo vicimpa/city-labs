@@ -1,13 +1,18 @@
 name: CI
-
 on:
   push:
     branches: [main]
   pull_request:
-
+  workflow_call:
+    inputs:
+      skip_desktop:
+        type: boolean
+        default: false
+permissions:
+  contents: read
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -15,7 +20,38 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
-      - name: Tests (format, MCP, road builder)
-        run: npm test
-      - name: Build the app bundle
-        run: npm run build:app
+      - run: npm test
+      - run: npm run build:web
+      - run: npx playwright install --with-deps chromium
+      - name: Headless authoring and export
+        run: npm run test:ui
+      - name: Static deployment and shared viewer
+        run: npm run test:web
+  desktop:
+    if: ${{ !inputs.skip_desktop }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential libxdo-dev libssl-dev librsvg2-dev libayatana-appindicator3-dev patchelf
+      - run: npm ci
+      - run: npm run build:app
+      - run: npm run test:app
+      - run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
+      - run: cargo test --manifest-path src-tauri/Cargo.toml --locked
+      - run: cargo clippy --manifest-path src-tauri/Cargo.toml --locked -- -D warnings
+      - run: npm run tauri -- build --no-bundle

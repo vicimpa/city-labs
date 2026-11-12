@@ -85,7 +85,7 @@ function valueEditor(obj, key, ctx, sub) {
       h('input', { type: 'text', value: v, list: id, onchange: (e) => set(e.target.value) }),
       list ? h('datalist', { id }, list.map((o) => h('option', { value: o }))) : null);
   }
-  if (isVec(v)) return h('span', { class: 'row vec' }, v.map((x, i) => numInput(x, (nx) => { const c = [...v]; c[i] = nx; set(c); }, 'xyzw'[i])));
+  if (isVec(v)) return h('span', { class: 'row vec' }, v.map((x, i) => numInput(x, (nx) => { const c = [...obj[key]]; c[i] = nx; set(c); }, 'xyzw'[i])));
   if (Array.isArray(v) && v.length && v.every(isRecord)) return recordList(obj, key, ctx, meta.label);
   const d = describe(key, v);
   return d ? summary(d, v, set) : jsonBox(v, set);
@@ -107,6 +107,7 @@ function recordList(obj, key, ctx, label = key) {
 function fields(obj, ctx, sub) {
   const box = h('div', { class: 'fields' });
   for (const key of Object.keys(obj)) {
+    if (sub === ctx.kind && ctx.omit?.includes(key)) continue;
     const v = obj[key], nested = Array.isArray(v) && v.length && v.every(isRecord), meta = fieldMeta(sub, key);
     box.append(h('div', { class: nested ? 'field nested' : 'field' },
       h('label', { title: key }, meta.label,
@@ -133,7 +134,7 @@ export function inspector(el, rec, ctx) {
       el.append(h('div', { class: 'fields' }, rec.map((x, i) => h('div', { class: 'field' }, h('label', {}, 'xyzw'[i] ?? i),
         numInput(x, (nv) => ctx.edit((r) => { r[i] = nv; }, 'xyzw'[i] ?? String(i)))))));
     } else {
-      el.append(h('div', { class: 'field' }, h('label', {}, t('insp.points')), jsonBox(rec, (nv) => ctx.edit((r) => { r.length = 0; r.push(...nv); }, t('insp.points')))));
+      el.append(h('div', { class: 'field' }, h('label', {}, t('insp.points')), jsonBox(rec, (nv) => ctx.edit((r) => { if (!Array.isArray(nv)) throw new Error('expected point array'); r.length = 0; for (const value of nv) r.push(value); }, t('insp.points')))));
     }
     return;
   }

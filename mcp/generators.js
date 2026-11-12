@@ -3,6 +3,7 @@
 // (Ctrl+Z in the editor) and derived geometry is rebuilt once. Used by the editor's Generators
 // tab and the MCP tool `generate`.
 import { makeWorld } from './script.js';
+import { localToWorld } from '../format/transforms.js';
 
 // ---------------------------------------------------------------- helpers
 function rng(seed) {                       // mulberry32
@@ -46,21 +47,39 @@ function roadClearance(world) {
 }
 /** Occupancy of building footprints (axis-aligned boxes in a hash), for overlap tests. */
 function footprints(world) {
-  const cell = 50, H = new Map(), boxes = [];
+  const cell = 50, H = new Map(), boxes = [], large = [];
   const add = (pts) => {
     let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
     for (const p of pts) { x0 = Math.min(x0, p[0]); y0 = Math.min(y0, p[1]); x1 = Math.max(x1, p[0]); y1 = Math.max(y1, p[1]); }
+    if (![x0, y0, x1, y1].every(Number.isFinite)) return;
     const b = [x0, y0, x1, y1]; boxes.push(b);
+    const grid = [Math.floor(x0 / cell), Math.floor(y0 / cell), Math.floor(x1 / cell), Math.floor(y1 / cell)];
+    // Legal tall/tilted/scaled buildings may cover millions of cells. Keep
+    // them as broad-phase boxes instead of expanding an unbounded hash.
+    if (!grid.every(Number.isSafeInteger) || (grid[2] - grid[0] + 1) * (grid[3] - grid[1] + 1) > 4096) { large.push(b); return; }
     for (let i = Math.floor(x0 / cell); i <= Math.floor(x1 / cell); i++) for (let j = Math.floor(y0 / cell); j <= Math.floor(y1 / cell); j++) {
       const k = i + ',' + j; let l = H.get(k); if (!l) H.set(k, l = []); l.push(b);
     }
   };
-  for (const b of world.list('building')) for (const p of b.parts ?? []) if (p.p?.length) add(p.p);
+  for (const b of world.list('building')) for (const part of b.parts ?? []) if (part.p?.length) {
+    // A tilted extrusion can project beyond its base ring. Reserve its complete
+    // world-space XY bounds, including both caps, under the existing conservative AABB policy.
+    function* projected() {
+      for (const q of part.p) for (const z of [part.z ?? 0, (part.z ?? 0) + (part.h ?? 0)])
+        yield localToWorld(b, [q[0], q[1], z]);
+    }
+    add(projected());
+  }
   const hits = (pts, pad = 0) => {
     let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
     for (const p of pts) { x0 = Math.min(x0, p[0]); y0 = Math.min(y0, p[1]); x1 = Math.max(x1, p[0]); y1 = Math.max(y1, p[1]); }
+    if (![x0, y0, x1, y1].every(Number.isFinite)) return false;
+    const intersects = (b) => x0 - pad < b[2] && b[0] < x1 + pad && y0 - pad < b[3] && b[1] < y1 + pad;
+    const grid = [Math.floor((x0 - pad) / cell), Math.floor((y0 - pad) / cell), Math.floor((x1 + pad) / cell), Math.floor((y1 + pad) / cell)];
+    if (!grid.every(Number.isSafeInteger) || (grid[2] - grid[0] + 1) * (grid[3] - grid[1] + 1) > 4096) return boxes.some(intersects);
+    if (large.some(intersects)) return true;
     for (let i = Math.floor((x0 - pad) / cell); i <= Math.floor((x1 + pad) / cell); i++) for (let j = Math.floor((y0 - pad) / cell); j <= Math.floor((y1 + pad) / cell); j++) {
-      for (const b of H.get(i + ',' + j) ?? []) if (x0 - pad < b[2] && b[0] < x1 + pad && y0 - pad < b[3] && b[1] < y1 + pad) return true;
+      for (const b of H.get(i + ',' + j) ?? []) if (intersects(b)) return true;
     }
     return false;
   };
@@ -196,13 +215,15 @@ export const GENERATORS = [
             if ([...poly, [cx, cy]].some((q) => clear(q[0], q[1]) < 1.5) || occ.hits(poly, 1.5)) { skipped++; continue; }
             const type = pick(rand, Z.types), floors = Math.round(fmin + (fmax - fmin) * rand() ** 1.6);
             const z = r2(Math.min(...zs) - 0.3), m = pick(rand, Z.mats), H = r2(floors * FLOOR + 0.6);
-            const parts = [{ p: poly, z, h: H, m }];
+            // Normalization mutates each part's vertices. Keep the world-space
+            // occupancy polygon separate, and do not alias wall/roof rings.
+            const parts = [{ p: poly.map((q) => [...q]), z, h: H, m }];
             if (type === 'podium_tower' && floors > 6) {        // podium + a slimmer tower on it
               parts[0].h = r2(3 * FLOOR);
               const k = 0.62, inner = poly.map((q) => [r2(cx + (q[0] - cx) * k), r2(cy + (q[1] - cy) * k)]);
               parts.push({ p: inner, z: r2(z + 3 * FLOOR), h: r2(H - 3 * FLOOR), m: pick(rand, Z.mats) });
             }
-            if (Z.roofs) parts.push({ p: poly, z: r2(z + H), h: 0.6, m: pick(rand, Z.roofs) });
+            if (Z.roofs) parts.push({ p: poly.map((q) => [...q]), z: r2(z + H), h: 0.6, m: pick(rand, Z.roofs) });
             world.create('building', { type, zone: p.zone, parts });
             occ.add(poly);
             made++;

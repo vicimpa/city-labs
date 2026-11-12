@@ -1,4 +1,4 @@
-# Vespera Editor: desktop app and MCP
+# Desktop and MCP
 
 The world editor runs in two ways:
 
@@ -7,25 +7,57 @@ The world editor runs in two ways:
 
 An MCP server lets an AI agent read and edit the world.
 
-## Desktop app
+## Desktop app (Tauri v2)
+
+Desktop macOS packages require macOS 13.5+ because the bundled Node 24 runtime does.
+
+Install Node 24+ and the [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/) for your OS
+(Rust, platform compiler, and WebKitGTK development packages on Linux). Then run:
 
 ```
-npm run app                           # opens the last file, or city/data/vespera.vspb
-npm run app -- path/to/other.vspb
+npm ci
+npm run app
+npm run app -- /absolute/path/to/world.vspb
+npm run build:app       # static web assets, bundled MCP JS, verified portable Node
+npm run check:desktop
+npm run dist            # complete installer for the current platform
 ```
 
-- **Файл → Открыть / Сохранить / Сохранить как / Перечитать с диска** (Cmd+O / Cmd+S / Shift+Cmd+S).
-  The app saves only when you ask. It writes atomically: a temp file, then a rename. Closing with
-  unsaved edits asks whether to save.
-- **Changes from outside**, for example by the MCP server or git, are picked up. A clean world
-  reloads silently. If you have unsaved edits, the app asks first.
-- **Dev server.** The app starts the Vite dev server in-process, so it needs the repo and
-  `node_modules`. It is not packaged as a standalone `.app`.
-- **`ELECTRON_RUN_AS_NODE`** is set for programs started from VS Code. `app/run.mjs` drops it,
-  otherwise Electron would start as plain Node.
+The Rust host owns the selected document. It opens native file dialogs and saves via a sibling
+exclusive temporary file, fsync and rename. Cancelling a dialog or failing full world validation does not replace the current save destination.
+Closing dirty work asks Save / Don't Save / Cancel; a cancelled Save As keeps the window open.
+A polling watcher checks file metadata every 700 ms, including replacement by external tools. The
+editor reloads clean documents and offers a choice for dirty documents. Files above 128 MiB are
+refused by the native host.
 
-Code: `app/main.mjs` (window, menu, files, MCP HTTP server), `app/preload.cjs` (bridge),
-host mode in `editor/main.js` (`window.vspbHost`).
+`src-tauri/src/main.rs` owns native files, menus, window lifecycle and child process supervision.
+`editor/desktop.js` implements the `window.vspbHost` contract before editor startup; the
+browser does not execute native imports. Browser file input, downloads and IndexedDB remain usable.
+`desktop/bridge.mjs` is an independent Node MCP sidecar with the same tools used by headless stdio.
+
+Production packages include an official portable Node binary pinned in `desktop/node-runtime.json`.
+`tools/prepare-node.mjs` downloads it from nodejs.org, checks SHA-256 against the release manifest,
+and includes its licence. macOS signing preserves the minimum V8 `allow-jit` entitlement for that runtime. Downloads
+are cached in `build/node-runtime/`; end users do not need Node installed. Development uses the Node
+that launches `npm run app`; its first launch also prepares cached native resources for compilation. Every target architecture needs its own runtime binary.
+
+Production assets come from `dist-web/`; desktop development uses a dedicated Vite configuration on
+localhost:5199 that does not expose the browser dev endpoint for overwriting the source sample.
+The editor receives a writable sample copy in the Tauri app-data `worlds` directory. The source
+`city/data/vespera.vspb` is never saved by the desktop host unless explicitly selected as a document.
+
+The main window has a native title bar. Menus follow the editor's Russian/English switch. OS-open
+requests are queued until the editor is ready, and the editor confirms before replacing dirty work.
+Install complete releases to update. Automatic updates are disabled.
+
+### Native authority
+
+Only the `main` window receives the application's `host_action` permission and event-listen access.
+Custom commands are registered with an explicit AppManifest. The frontend has no filesystem plugin
+permissions, no shell-spawn permission and no remote-origin capability. File paths come from native
+pickers/OS-open requests, and `openPath` is checked against those selected paths. The host saves only
+the current document or a path selected in Save As/Export. Native command permissions do not sandbox
+the trusted Node tool implementations; MCP scripts must still be trusted.
 
 ## MCP
 
@@ -40,10 +72,17 @@ The tools are defined once in `mcp/ops.js`, against an abstract session, and are
 **HTTP in the app**: `http://127.0.0.1:7357/mcp` (Streamable HTTP, stateless).
 
 - Change the port with `VSPB_MCP_PORT`.
-- To register it in Claude Code: `claude mcp add --transport http vespera-editor http://127.0.0.1:7357/mcp`.
-  The app's MCP menu copies this command.
-- The server listens on loopback only and refuses requests whose `Origin` is a non-local site.
-  There is no other authentication: any program on this machine can call it while the app runs.
+- Configure a compatible MCP client with this HTTP endpoint, or use the stdio command above.
+
+- The server listens on 127.0.0.1 only. It validates Host and exact Origin (including port), validates
+  `/tool` arguments, caps request bodies at 2 MiB and limits pending requests. Tool calls are serialized.
+- Optional `VSPB_MCP_TOKEN` requires `Authorization: Bearer …` on all endpoints, including health.
+  Set the same variable for the stdio proxy. Without it, any local process can call the server;
+  browser pages from other origins are rejected. Keep scripts and local MCP clients trusted.
+- Rust starts and stops the sidecar with the window lifecycle. Closing the host kills the child;
+  the sidecar also exits when its stdin closes. A port conflict is logged and does not silently
+  connect to a different editor. `screenshot` captures the rendered Three.js canvas and restores UI
+  panels even when capture fails.
 
 | tool | what it does |
 | --- | --- |
@@ -51,8 +90,10 @@ The tools are defined once in `mcp/ops.js`, against an abstract session, and are
 | `list_types` | type registry entries (materials, building types, zones, surfaces, prefabs, road classes) |
 | `find` | records of a kind filtered by fields (`=`, `contains`, `in`, `min/max`), `near`, `bbox` |
 | `get` / `update` / `create` / `delete` | one record by kind + index (or id for roads and nodes); kinds include `rail` and `powerline` |
-| `transform` | move / rotate, optionally onto the ground |
-| `road_add` | lays a road through points; its ends attach to nodes or split the road they land on |
+| `transform` | move / rotate / nonuniform scale, optionally onto the ground; local building buffers stay unchanged |
+| `material_assign` | assign shared material to a building part/slot or a furniture override |
+| `road_add` | lays a road through points with optional elevation; level-aware ends attach to nodes or split the road they land on |
+| `road_controls` / `road_edit_control` | inspect/move/insert/remove sparse controls; linked nodes and roads follow |
 | `road_reprofile` | re-levels a road over the natural ground |
 | `terrain_sample` / `terrain_edit` | heights, and raise / lower / flatten / smooth of the natural ground |
 | `map` | a top-down map image of an area (or the whole city), with numbered roads in the legend; works without the app |
@@ -62,7 +103,7 @@ The tools are defined once in `mcp/ops.js`, against an abstract session, and are
 | `def_set` | creates, replaces or deletes a registry entry |
 | `save` | writes the file |
 | `screenshot` (app) | the 3D view as a PNG, optionally after aiming the camera or focusing a record |
-| `select`, `undo`, `redo` (app) | drive the editor UI and its history |
+| `select` (app), `undo`, `redo` | select in the live UI; undo/redo also work in a headless file session |
 
 Derived data (asphalt, junctions, bents, graded terrain, road furniture) is rebuilt after every
 call, as it is for edits made by hand.
@@ -87,8 +128,20 @@ for (const { rec } of t) world.edit('building', rec, (b) => b.parts.forEach((p) 
 return t.length;
 ```
 
-All edits of one run are one undo step. Derived geometry is rebuilt once, at the end. A script runs
+All edits of one successful run are one undo step. A failed run rolls back commands, history and dirty state.
+Derived geometry is rebuilt once, at the end. The same validation and transformations are shared
+with manual editing; a live MCP mutation is refused during an active gesture or file operation. A script runs
 in the app's or the server's process, so only run code you trust.
+
+Building contours are local in document version 2. Use `world.center`, `world.move`,
+`world.rotate`, `world.scale` or the `transform` tool for world placement. Furniture retains
+`p/h` and adds `tilt/scale`; changing it manually removes its road-generated owner.
+Generic edits cannot replace road IDs/connections; topology belongs to road tools.
+
+Game export writes glTF 2 binary in metres/Y-up. `extras.cityLabs` carries export-local entity
+IDs, triangle/instance ownership ranges and road-graph metadata. VSPB remains the authoring
+source. Export does not create engine-specific collision or navigation meshes or bake tunnel
+shader clipping; consult the metadata/terrain settings when importing into a game engine.
 
 ### Generators
 
@@ -109,7 +162,7 @@ To add a generator, give it an entry in `GENERATORS`, plus `gen.<id>`, `gen.<id>
 
 ## Lines: control points, heights, railways and power lines
 
-- **Control points.** Roads, railways and train routes are dense (a point every 4–8 m). With
+- **Control points.** Roads and railways are dense (a point every 4–8 m). With
   **control points** on (Select tool options), only the points that carry the shape get handles,
   about one per 50 m. They are found by simplifying the line within the **control tolerance**.
   - **Drag** one and the line bends smoothly up to the second control point on each side; the rest
@@ -138,8 +191,7 @@ To add a generator, give it an entry in `GENERATORS`, plus `gen.<id>`, `gen.<id>
     (`world/power.js`).
   - Moving a post re-strings the line. MCP creates and edits them as kind `powerline`.
 
-`tools/migrate_structures.mjs` converted the sample city's stored rail piers, pylons, poles and
-their cables into this derived form.
+`tools/migrate-structures.mjs` converts stored structural props into derived rail and power-line records, writing a separate output file.
 
 ## Export and facades
 
@@ -157,20 +209,17 @@ their cables into this derived form.
 
 ## Window and language
 
-- **No system title bar.** The editor's top bar is the title bar. On macOS the traffic lights sit
-  at its left. On Windows and Linux the system buttons sit at its right, and a ☰ button opens the
-  app menu. Drag the bar to move the window; double-click it to maximize.
-- **Languages: Russian and English.** Use the switch at the top right; the first launch follows the
-  system language. The choice also applies to the menu, the dialogs and the splash. The strings live
-  in `editor/locales/{ru,en}.js` under keys such as `save.dirty`, and `npm test` checks that every
-  key the UI uses exists in both locales.
+The desktop uses the OS title bar and window controls. The native File menu exposes New / Open /
+Save / Save As / Reload / Sample / Export; the Edit menu supports text clipboard operations. Scene
+undo stays in the editor's history. The editor's language switch updates native menus and close
+dialogs.
 
 ## Files and the web version
 
 - **Start-up.** Both the app and the web editor start with a new empty map. The browser continues
   its IndexedDB working copy if there is one. The sample city opens with the **Sample** button.
 - **File association.** The installers register `.vspb`. On macOS a double-click reaches the app as
-  `open-file`. On Windows and Linux the path arrives on the command line, or through the running
+  Tauri `RunEvent::Opened`. On Windows and Linux the path arrives on the command line, or through the running
   instance (single-instance lock). If the open map has unsaved changes, the editor asks first.
 - **Web version.** <https://vicimpa.github.io/city-labs/> is built by `npm run build:web` and
   published by `.github/workflows/pages.yml` on every push to `main`. Files are opened from disk
@@ -179,7 +228,20 @@ their cables into this derived form.
 ## Tests
 
 ```
-npm test            # localization keys, format, MCP headless (incl. map and scripts), road builder
-npm run test:mcp    # stdio server headless on a scratch copy: every tool, then re-read the saved file
-npm run test:app    # desktop app end to end (Playwright Electron) on a scratch copy and port 7399
+npm test                # unit and integration suites
+npm run test:ui         # isolated headless browser workflows
+npm run test:web        # production browser deployment
+npm run build:app       # prepare runtime/resources before native compilation
+npm run test:app        # source + bundled sidecar MCP process/HTTP integration
+npm run test:update     # package/capability and release metadata contract
+cargo test --manifest-path src-tauri/Cargo.toml
+cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
+npm run dist
 ```
+
+The sidecar test uses a deterministic editor RPC fixture; it does not claim to drive the native
+WebView. Rust tests cover atomic file replacement, preservation on failure, invalid documents and
+size limits. CI compiles and tests the native host on macOS, Windows and Linux. The web build and
+browser tests remain independent. Real installed-app checks still need native UI/WebDriver access:
+open/save/cancel, dirty close, file association, second instance, external edits, live MCP undo and
+screenshots. Packaging and automated unit checks do not substitute for those checks.

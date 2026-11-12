@@ -1,6 +1,8 @@
 // Vespera world document on top of VSPB: column types for the known layers, the default type
 // registry (`defs` layer) and load/save helpers. A document is { meta, layers, schema }.
 import { decode, encode, encodeLayer, assemble, optsFor } from './vspb.js';
+import { ensureLocalBuilding } from './transforms.js';
+import { DOCUMENT_VERSION, validateWorld } from './validate.js';
 
 export const LAYERS = ['defs', 'terrain', 'roads', 'furniture', 'buildings'];
 
@@ -8,6 +10,7 @@ export const LAYERS = ['defs', 'terrain', 'roads', 'furniture', 'buildings'];
 export const HINTS = {
   'terrain.x0': 'f64', 'terrain.y0': 'f64', 'terrain.res': 'f64', 'terrain.nx': 'u32', 'terrain.ny': 'u32',
   'terrain.sea_level': 'f32', 'terrain.h': 'f32[]!', 'terrain.base': 'f32[]!', 'terrain.bore': 'u32[]!',
+  'terrain.gradeIndex': 'u32[]!', 'terrain.gradeHeight': 'f32[]!',
   'roads.classes.hw': 'f32', 'roads.classes.hwt': 'f32', 'roads.classes.lanes': 'u8', 'roads.classes.side': 'f32',
   'roads.classes.lane_w': 'f32', 'roads.classes.shoulder': 'f32', 'roads.classes.median': 'f32', 'roads.classes.max_grade': 'f32',
   'roads.nodes.id': 'u32', 'roads.nodes.p': 'f32x3', 'roads.nodes.grad': 'f32x2',
@@ -15,6 +18,7 @@ export const HINTS = {
   'roads.edges.elev': 'u8[]', 'roads.edges.tunnel': 'u8[]',
   'furniture.items.p': 'f32x3', 'furniture.items.h': 'f32', 'furniture.items.span': 'f32',
   'furniture.items.hgt': 'f32', 'furniture.items.reach': 'f32',
+  'furniture.items.scale': 'f32x3', 'furniture.items.tilt': 'f32x2',
   'buildings.core': 'f32x2', 'buildings.trees': 'f32x3[]', 'buildings.rails': 'f32x3[][]',
   'buildings.cables': 'f32x3[][]', 'buildings.wind': 'f32x4[]',
   'buildings.items.parts.p': 'f32x2[]', 'buildings.items.parts.holes': 'f32x2[][]',
@@ -122,6 +126,8 @@ const AUTO_CELLS = 1_100_000;                // what 'auto' aims for: light enou
 /** Grid step for a map: the requested one if it fits MAX_CELLS, else (and for 'auto') the finest of
  *  1, 2, 4, 6, 8, 12, 16… m within the budget. */
 export function gridStep(width, depth, res = 'auto') {
+  if (![width, depth].every((v) => Number.isFinite(v) && v >= 16 && v <= 64000)) throw new Error('map dimensions must be between 16 and 64000 metres');
+  if (res !== 'auto' && (!Number.isFinite(+res) || +res <= 0)) throw new Error('grid spacing must be positive');
   const cells = (r) => (Math.round(width / r) + 1) * (Math.round(depth / r) + 1);
   if (res !== 'auto' && cells(+res) <= MAX_CELLS) return +res;
   const budget = res === 'auto' ? AUTO_CELLS : MAX_CELLS;
@@ -155,20 +161,44 @@ export function emptyWorld({ size, width = size ?? 4000, depth = width, res = 'a
 
 /** Fill registry entries the document lacks (old files, new built-in types); never overwrites. */
 export function withDefaults(doc) {
+  const version = doc.meta?.documentVersion ?? 1;
+  if (!Number.isInteger(version) || version < 1 || version > DOCUMENT_VERSION) throw new Error(`city: unsupported document version ${version}`);
+  doc.meta ??= {};
+  doc.meta.documentVersion = DOCUMENT_VERSION;
+  doc.meta.units ??= 'metres';
+  doc.meta.upAxis ??= 'Z';
   // natural ground the roads are graded into; files from before it existed start from the graded one
   const t = doc.layers.terrain;
-  if (t?.h && !t.base) t.base = Float32Array.from(t.h);
+  if (t?.heightEncoding === 'sparse-grade-v1') {
+    const n = t.nx * t.ny, indices = t.gradeIndex, heights = t.gradeHeight;
+    if (!Number.isSafeInteger(n) || n < 4 || n > MAX_CELLS || t.base?.length !== n || !indices || !heights || indices.length !== heights.length) throw new Error('terrain: corrupt sparse heightfield');
+    t.h = Float32Array.from(t.base);
+    let previous = -1;
+    for (let i = 0; i < indices.length; i++) {
+      const k = indices[i];
+      if (!Number.isInteger(k) || k <= previous || k >= n || !Number.isFinite(heights[i])) throw new Error('terrain: invalid sparse height index/value');
+      t.h[k] = heights[i]; previous = k;
+    }
+    delete t.gradeIndex; delete t.gradeHeight; delete t.heightEncoding;
+  }
+  if (t?.h && !t.base) t.base = ArrayBuffer.isView(t.h) ? t.h.slice() : [...t.h];
   const d = (doc.layers.defs ??= {});
   for (const [k, v] of Object.entries(DEFAULT_DEFS)) {
     if (typeof v !== 'object') { d[k] ??= v; continue; }
-    d[k] ??= {};
-    for (const [name, def] of Object.entries(v)) d[k][name] ??= structuredClone(def);
+    if (d[k] === undefined) { d[k] = structuredClone(v); continue; }
+    // Add missing built-ins only during v1 migration. In authored v2 registries
+    // an absent entry may have been deliberately deleted by the user.
+    if (version < 2) for (const [name, def] of Object.entries(v)) d[k][name] ??= structuredClone(def);
+  }
+  for (const b of doc.layers.buildings?.items ?? []) {
+    if (!b.transform) (doc.migratedLayers ??= new Set()).add('buildings');
+    ensureLocalBuilding(b);
   }
   return doc;
 }
 
 // ---------------------------------------------------------------- load / save
-export async function decodeWorld(buf) { return withDefaults(await decode(buf)); }
+export async function decodeWorld(buf) { return validateWorld(withDefaults(await decode(buf))); }
 
 export async function loadWorld(url = '/city/data/vespera.vspb') {
   const res = await fetch(url);
@@ -176,14 +206,28 @@ export async function loadWorld(url = '/city/data/vespera.vspb') {
   return decodeWorld(await res.arrayBuffer());
 }
 
-export const encodeWorld = (doc) => encode(doc, OPTS);
-export const encodeWorldLayer = (doc, name) => encodeLayer(name, doc.layers[name], optsFor(doc, OPTS));
+// Keep the authored natural heightfield and only the graded cells that differ.
+// Heights are absolute Float32 overrides (not deltas), so decoding is bit-exact.
+// This avoids storing a second nearly identical terrain grid and preserves old
+// cities whose grading was produced by an earlier algorithm.
+function storageTerrain(t) {
+  if (!(t?.base instanceof Float32Array) || !(t.h instanceof Float32Array) || t.base.length !== t.h.length) return t;
+  const indices = [], heights = [];
+  for (let i = 0; i < t.h.length; i++) if (!Object.is(t.h[i], t.base[i])) { indices.push(i); heights.push(t.h[i]); }
+  if (indices.length > t.h.length / 2) return t;
+  const { h, ...stored } = t;
+  return { ...stored, heightEncoding: 'sparse-grade-v1', gradeIndex: Uint32Array.from(indices), gradeHeight: Float32Array.from(heights) };
+}
+export const encodeWorld = (doc) => {
+  validateWorld(withDefaults(doc));
+  return encode({ ...doc, layers: { ...doc.layers, terrain: storageTerrain(doc.layers.terrain) } }, OPTS);
+};
+export const encodeWorldLayer = (doc, name) => encodeLayer(name, name === 'terrain' ? storageTerrain(doc.layers[name]) : doc.layers[name], optsFor(doc, OPTS));
 export { assemble };
 
 // ---------------------------------------------------------------- registry lookups for renderers
 export function facadeFor(defs, material, type) {
   const wall = defs.buildingTypes?.[type]?.wall;
-  if (!wall) return null;
   const f = defs.materials?.[material]?.facade, name = f === 'wall' ? wall : f;
   return name && defs.facades?.[name] ? name : null;
 }

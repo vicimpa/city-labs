@@ -7,11 +7,17 @@ __pycache__/
 city/out/
 city/data/unpacked/
 city/data/*.json
-!city/data/drive_issues.json
 test-results/
-# CC0 Poly Haven textures/HDRIs from the Blender era (re-downloadable, unused by the web renderer)
+# Optional local asset library
 city/assets/
 *.vspb.tmp
 build/
 release/
 dist-web/
+
+# Tauri build products (source config and Cargo.lock are committed)
+src-tauri/target/
+src-tauri/gen/
+src-tauri/binaries/city-labs-node-*
+src-tauri/resources/mcp.cjs
+src-tauri/resources/node-LICENSE.txt

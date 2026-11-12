@@ -2,6 +2,7 @@
 // records and bulk edits. Used by the MCP tool `run_script` and by the editor's Script tab.
 // All edits of a run go through session.batch(): one undo step, derived data rebuilt once.
 import { addRoad, reprofile, deleteEdge, deleteNode } from '../editor/roadedit.js';
+import { transformRecord } from '../editor/commands.js';
 
 export const SCRIPT_API = `The world API:
 - world.layers: the raw data (terrain, roads, buildings, furniture, defs, …)
@@ -11,6 +12,7 @@ export const SCRIPT_API = `The world API:
 - world.edit(kind, rec, fn): fn(rec) mutates the record (undoable); derived geometry follows
 - world.create(kind, rec): the new record; world.remove(kind, rec)
 - world.move(kind, rec, dx, dy, dz = 0), world.rotate(kind, rec, degrees)
+- world.scale(kind, rec, factor | [sx,sy,sz]): local object scale (building/furniture)
 - world.addRoad(points, cls, name?): the new edge; world.reprofile(edgeId)
 - world.terrain({ x, y, radius, mode: 'raise' | 'lower' | 'flatten' | 'smooth', amount, height? })
 - world.shapeTerrain((base, t) => { … }, box?): edit natural heights base[j * t.nx + i] directly (t.x0, t.y0, t.res, t.nx, t.ny)
@@ -47,8 +49,9 @@ export function makeWorld(s, label, logs = [], counter = { edits: 0 }, terrainEd
       else if (kind === 'node') s.roadTx(deleteNode(s.doc, rec), label);
       else s.remove(kind, rec, label);
     },
-    move: (kind, rec, dx, dy, dz = 0) => world.edit(kind, rec, (r) => kinds[kind].move(r, dx, dy, dz, L())),
-    rotate: (kind, rec, deg) => world.edit(kind, rec, (r) => { const [cx, cy] = kinds[kind].center(r); kinds[kind].rotate(r, (deg * Math.PI) / 180, cx, cy); }),
+    move: (kind, rec, dx, dy, dz = 0) => world.edit(kind, rec, (r) => transformRecord(s.doc, kind, r, { dx, dy, dz })),
+    rotate: (kind, rec, deg) => world.edit(kind, rec, (r) => transformRecord(s.doc, kind, r, { rotate_deg: deg })),
+    scale: (kind, rec, factor) => world.edit(kind, rec, (r) => transformRecord(s.doc, kind, r, { scale: factor })),
     addRoad: (points, cls, name = '') => {
       const res = addRoad(s.doc, s.natural, points, cls, name);
       if (!res) throw new Error('could not lay the road');
@@ -83,7 +86,7 @@ export async function runScript(s, code, args, label = 'script', terrainEdit = n
   try {
     await s.batch(label, async () => { result = await fn(world, args); });
   } catch (e) {
-    const err = new Error(`${e?.stack ?? e}${logs.length ? '\nlog:\n' + logs.join('\n') : ''}${counter.edits ? `\n${counter.edits} edit(s) before the error were applied` : ''}`);
+    const err = new Error(`${e?.stack ?? e}${logs.length ? '\nlog:\n' + logs.join('\n') : ''}${counter.edits ? `\n${counter.edits} edit(s) were rolled back` : ''}`);
     throw err;
   }
   return { result: clip(result), logs, edits: counter.edits, ms: Date.now() - t0 };

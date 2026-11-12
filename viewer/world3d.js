@@ -4,6 +4,10 @@
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { facadeTextures } from './facades.js';
+import { buildingGeometries } from './buildings.js';
+import { TerrainChunks } from './terrain.js';
+import { disposeRenderObjects } from './resources.js';
+import { buildingMatrix, buildingCenter, ensureLocalBuilding, objectMatrix } from '../format/transforms.js';
 import { facadeFor } from '../format/world.js';
 import { RoadWorld } from '../world/roadworld.js';
 import { railPiers, elevatedRuns, PIER, GIRDER } from '../world/rail.js';
@@ -79,21 +83,14 @@ function drape(geo, H, lift, maxEdge = 5) {
   return g;
 }
 
-function sliceGeometry(g, start, count) {
-  const out = new THREE.BufferGeometry();
-  for (const name of ['position', 'normal', 'uv']) {
-    const a = g.attributes[name]; if (!a) continue;
-    out.setAttribute(name, new THREE.BufferAttribute(a.array.slice(start * a.itemSize, (start + count) * a.itemSize), a.itemSize));
-  }
-  return out;
-}
-
 // merged mesh whose faces map back to records: owners = [{rec, end}] sorted by end triangle
 function ownedMesh(entries, material, kind) {
   const g = mergeGeometries(entries.map((e) => e.g));
   entries.forEach((e) => e.g.dispose());
-  g.computeVertexNormals();
+  if (!g.attributes.normal) g.computeVertexNormals();
+  g.computeBoundingBox(); g.computeBoundingSphere();
   const mesh = new THREE.Mesh(g, material);
+  mesh.castShadow = kind === 'building'; mesh.receiveShadow = true;
   const ends = [], recs = [];
   let n = 0;
   for (const e of entries) { n += e.g.attributes.position.count / 3; ends.push(n); recs.push(e.rec); }
@@ -138,6 +135,7 @@ function tunnelClip(material, roads, then = null) {
   const data = new Float32Array(tw * th * 4); data.set(seg);
   const tex = new THREE.DataTexture(data, tw, th, THREE.RGBAFormat, THREE.FloatType);
   tex.needsUpdate = true;
+  (material.userData.ownedTextures ??= []).push(tex);
   const box = [], range = [];
   for (let r = 0; r < MAX_RUNS; r++) {
     const R = runs[r];
@@ -202,16 +200,19 @@ if (gridOn > 0.5) {
 }
 
 export class World3D {
-  /** @param doc world document; opts.tileSize in metres (Infinity = one tile, best for a static viewer) */
-  constructor(doc, { anisotropy = 4, tileSize = Infinity, tickers = [], grid = false } = {}) {
+  /** @param doc world document; opts.tileSize in metres (Infinity disables spatial batching). */
+  constructor(doc, { anisotropy = 4, tileSize = 600, roadTileSize = 1200, tickers = [], grid = false, detail = 'medium', quality = 'medium', detailDistance = 650, showTrains = false, animateTrains = false } = {}) {
     this.doc = doc;
-    this.tileSize = tileSize;
+    this.detail = detail; this.quality = quality; this.detailDistance = detailDistance;
+    this.showTrains = showTrains; this.animateTrains = animateTrains; this.disposed = false;
+    this.tileSize = tileSize; this.roadTileSize = roadTileSize;
     this.tickers = tickers;
     this.anisotropy = anisotropy;
     this.facades = facadeTextures(doc.layers.defs?.facades, anisotropy);
     this.hidden = new Set();                // records left out of the merged meshes (being edited live)
     this.night = false;
     this.mats = new Map();                  // building material cache  'm|facade' -> material
+    this.propMats = new Map();              // separately owned PBR descriptors for furniture
     this.smats = new Map();                 // surface materials
     this.groups = {};
     for (const n of ['terrain', 'roads', 'furniture', 'buildings']) this.groups[n] = new THREE.Group();
@@ -241,26 +242,23 @@ export class World3D {
 
   // ---------------------------------------------------------------- terrain
   buildTerrain() {
+    this.clearGroup(this.groups.terrain);
+    this.terrainGeo?.dispose();
     const t = this.L.terrain, { nx, ny, x0, y0, res, h } = t;
     const pos = new Float32Array(nx * ny * 3), col = new Float32Array(nx * ny * 3), nrm = new Float32Array(nx * ny * 3);
     for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) { const k = (j * nx + i) * 3; pos[k] = x0 + i * res; pos[k + 1] = y0 + j * res; }
-    const idx = new Uint32Array((nx - 1) * (ny - 1) * 6);
-    let n = 0;
-    for (let j = 0; j < ny - 1; j++) for (let i = 0; i < nx - 1; i++) {
-      const a = j * nx + i, b = a + 1, d = a + nx, e = d + 1;
-      idx[n++] = a; idx[n++] = b; idx[n++] = e; idx[n++] = a; idx[n++] = e; idx[n++] = d;
-    }
     const g = new THREE.BufferGeometry();
     g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
     g.setAttribute('color', new THREE.BufferAttribute(col, 3));
     g.setAttribute('normal', new THREE.BufferAttribute(nrm, 3));
-    g.setIndex(new THREE.BufferAttribute(idx, 1));
+    // Full authoring/export attributes stay CPU-only; chunk-local meshes own GPU buffers.
     this.terrainGeo = g;
     this.updateTerrain(0, 0, nx - 1, ny - 1, false);
     g.computeBoundingSphere(); g.computeBoundingBox();
-    const mesh = this.terrainMesh = new THREE.Mesh(g, this.terrainMaterial());
+    this.terrainRenderMaterial = this.terrainMaterial();
+    this.terrainChunks = new TerrainChunks(t, g, this.terrainRenderMaterial, { roads: this.L.roads, surfaces: this.L.buildings?.surfaces, quality: this.quality });
+    const mesh = this.terrainMesh = this.terrainChunks.group;
     mesh.userData = { kind: 'terrain' };
-    mesh.raycast = () => {};                // 9M triangles: picking goes through the heightfield instead
     const water = new THREE.Mesh(new THREE.PlaneGeometry(30000, 30000),
       new THREE.MeshPhongMaterial({ color: 0x0d2233, shininess: 80, transparent: true, opacity: 0.92 }));
     water.position.z = -0.3;                // keep off the shoreline (z-fighting)
@@ -291,10 +289,7 @@ export class World3D {
       const dy = (h[Math.min(j + 1, ny - 1) * nx + i] - h[Math.max(j - 1, 0) * nx + i]) / (2 * res);
       const L = Math.hypot(dx, dy, 1); nrm[k] = -dx / L; nrm[k + 1] = -dy / L; nrm[k + 2] = 1 / L;
     }
-    if (!upload) return;
-    for (const a of [g.attributes.position, g.attributes.color, g.attributes.normal]) {
-      a.clearUpdateRanges(); a.addUpdateRange(j0 * nx * 3, (j1 - j0 + 1) * nx * 3); a.needsUpdate = true;
-    }
+    if (upload) this.terrainChunks?.updateRegion(i0, j0, i1, j1);
   }
 
   // ---------------------------------------------------------------- roads (built from the graph by world/roadworld.js)
@@ -314,12 +309,12 @@ export class World3D {
     this.roadTiles.clear(); this.roadTileOf.clear(); this.groups.roads.clear();
     for (const key of this.roadWorld.bufs.keys()) this.placeRoad(key);
     for (const key of this.roadTiles.keys()) this.buildRoadTile(key);
-    this.buildBents();
+    this.buildBents(); this.terrainChunks?.setRoads(this.L.roads);
   }
   placeRoad(key) {
     const o = this.roadWorld.owner(key);
     if (!o) return null;
-    const tk = this.keyOf(o.at[0], o.at[1]);
+    const tk = this.roadTileSize === Infinity ? '0' : Math.floor(o.at[0] / this.roadTileSize) + ',' + Math.floor(o.at[1] / this.roadTileSize);
     if (!this.roadTiles.has(tk)) this.roadTiles.set(tk, { recs: new Set(), obj: null });
     this.roadTiles.get(tk).recs.add(key); this.roadTileOf.set(key, tk);
     return tk;
@@ -345,11 +340,17 @@ export class World3D {
         for (let k = 0; k < b.i.length; k++) idx[oi + k] = b.i[k] + ov / 3;
         ov += b.v.length; oi += b.i.length; ends.push(oi / 3); owners.push(o);
       }
+      // The generator sweeps tunnel faces toward the bore. DoubleSide hides the
+      // winding visually, but shadow normalBias then offsets roof receivers INTO
+      // the shell, causing acne. Orient only the render shell outward; DoubleSide
+      // keeps both views and all shadows. Face order/positions/owner ranges stay intact.
+      if (mat === 'tunnel') for (let k = 0; k < idx.length; k += 3) { const b = idx[k + 1]; idx[k + 1] = idx[k + 2]; idx[k + 2] = b; }
       const g = new THREE.BufferGeometry();
       g.setAttribute('position', new THREE.BufferAttribute(v, 3));
       g.setIndex(new THREE.BufferAttribute(idx, 1));
       g.computeVertexNormals();
       const mesh = new THREE.Mesh(g, this.roadMaterial(mat));
+      mesh.castShadow = mesh.receiveShadow = true;
       // log depth writes gl_FragDepth, so polygonOffset no longer applies: lift paint a few cm instead
       if (this.defs.roadMaterials?.[mat]?.paint) { mesh.position.z = 0.05; mesh.renderOrder = 1; }
       const find = (face) => { let lo = 0, hi = ends.length - 1; while (lo < hi) { const m = (lo + hi) >> 1; if (ends[m] > face) hi = m; else lo = m + 1; } return owners[lo]; };
@@ -369,6 +370,7 @@ export class World3D {
       g.setIndex(new THREE.BufferAttribute(new Uint32Array(b.i), 1));
       g.computeVertexNormals();
       const mesh = new THREE.Mesh(g, this.roadMaterial(mat));
+      mesh.castShadow = mesh.receiveShadow = true;
       mesh.raycast = () => {};
       grp.add(mesh);
     }
@@ -394,7 +396,11 @@ export class World3D {
   terrainChanged(box, tunnels = false) {
     const t = this.L.terrain, [i0, j0, i1, j1] = box;
     this.updateTerrain(i0, j0, i1, j1);
-    if (tunnels) { const m = this.terrainMesh.material; this.terrainMesh.material = this.terrainMaterial(); m.dispose(); }
+    if (tunnels) {
+      const m = this.terrainRenderMaterial; this.terrainRenderMaterial = this.terrainMaterial();
+      this.terrainChunks.setMaterial(this.terrainRenderMaterial); this.terrainChunks.setRoads(this.L.roads);
+      disposeRenderObjects([], { extra: [m] });
+    }
     this.buildRails(); this.buildCables();         // piers and power posts stand on the ground
     if (this.tileSize === Infinity) { this.buildSurfaces(); return; }
     const xa = t.x0 + i0 * t.res, ya = t.y0 + j0 * t.res, xb = t.x0 + i1 * t.res, yb = t.y0 + j1 * t.res, pad = 400;
@@ -414,66 +420,186 @@ export class World3D {
         g.rotateX(Math.PI / 2); g.translate(x, y, z + (p.h ?? 1) / 2);
       } else if (p.k === 'ico') { g = new THREE.IcosahedronGeometry(p.r ?? 1, 0); g.translate(x, y, z); }
       else { g = new THREE.BoxGeometry(1, 1, 1); g.translate(x, y, z + 0.5); }
-      P.push([g, p.c]);
+      P.push([g, p.c, p.m]);
     }
     return P;
   }
+  propMaterial(d = {}) {
+    const glows = (d.glow || d.nightGlow) > 0;
+    const pbr = { roughness: d.roughness ?? (d.shininess === undefined ? 0.8 : this.legacyRoughness(d)),
+      metalness: d.metalness ?? 0, opacity: d.opacity ?? 1,
+      emissive: new THREE.Color(d.emissive ?? (glows ? d.color ?? MISSING : 0x000000)).getHex(),
+      day: d.emissiveIntensity ?? (glows ? d.glow ?? 0 : 0), night: d.emissiveIntensity ?? (glows ? d.nightGlow ?? 0 : 0) };
+    const key = JSON.stringify(pbr);
+    let mat = this.propMats.get(key);
+    if (!mat) {
+      mat = new THREE.MeshStandardMaterial({ color: 0xffffff, vertexColors: true, roughness: pbr.roughness, metalness: pbr.metalness,
+        opacity: pbr.opacity, transparent: pbr.opacity < 1, depthWrite: pbr.opacity >= 1, emissive: pbr.emissive });
+      mat.userData.pbr = pbr; mat.emissiveIntensity = this.night ? pbr.night : pbr.day; this.propMats.set(key, mat);
+    }
+    return mat;
+  }
   buildFurniture() {
-    const grp = this.groups.furniture, byType = {};
-    grp.traverse((o) => { if (o.isMesh) { o.geometry.dispose(); o.material.dispose(); } });
-    grp.clear();
-    for (const it of this.L.furniture.items) if (!this.hidden.has(it)) (byType[it.t] ??= []).push(it);
-    const m = new THREE.Matrix4(), q = new THREE.Quaternion(), z = new THREE.Vector3(0, 0, 1), one = new THREE.Vector3(1, 1, 1), v = new THREE.Vector3();
-    for (const [t, items] of Object.entries(byType)) {
-      for (const [geo, col] of this.prefab(t)) {
-        const im = new THREE.InstancedMesh(geo, new THREE.MeshLambertMaterial({ color: color(col) }), items.length);
-        items.forEach((it, i) => { im.setMatrixAt(i, m.compose(v.set(...it.p), q.setFromAxisAngle(z, it.h ?? 0), one)); });
-        im.computeBoundingSphere();
-        im.userData = { kind: 'furniture', owner: (i) => items[i] };
-        grp.add(im);
+    const grp = this.groups.furniture, batches = new Map(), usedMaterials = new Set();
+    // Props retain cached PBR materials across rebuilds. They never borrow building materials.
+    disposeRenderObjects([grp], { materials: false }); grp.clear();
+    for (const it of this.L.furniture?.items ?? []) if (!this.hidden.has(it)) {
+      const key = JSON.stringify([this.keyOf(...it.p), it.t, it.material ?? null]);
+      if (!batches.has(key)) batches.set(key, { type: it.t, override: it.material, items: [] });
+      batches.get(key).items.push(it);
+    }
+    const prefabs = new Map(), matrix = new THREE.Matrix4();
+    for (const { type, override, items } of batches.values()) {
+      const prefabKey = JSON.stringify([type, override ?? null]);
+      if (!prefabs.has(prefabKey)) {
+        const byMaterial = new Map();
+        for (const [g, col, partMaterial] of this.prefab(type)) {
+          const resource = override ?? partMaterial, d = resource === undefined ? {} : this.defs.materials?.[resource] ?? {};
+          const material = this.propMaterial(d), c = resource === undefined ? color(col) : color(d.color);
+          const nonindexed = g.index ? g.toNonIndexed() : g;
+          if (nonindexed !== g) g.dispose();
+          const colors = new Float32Array(nonindexed.attributes.position.count * 3);
+          for (let i = 0; i < colors.length; i += 3) { colors[i] = c.r; colors[i + 1] = c.g; colors[i + 2] = c.b; }
+          nonindexed.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+          if (!byMaterial.has(material)) byMaterial.set(material, []); byMaterial.get(material).push(nonindexed);
+        }
+        prefabs.set(prefabKey, [...byMaterial].map(([material, parts]) => {
+          const geometry = mergeGeometries(parts); parts.forEach((g) => g.dispose()); return [geometry, material];
+        }));
+      }
+      for (const [geometry, material] of prefabs.get(prefabKey)) {
+        usedMaterials.add(material);
+        if (material.transparent) {
+          // Three sorts objects, not instances. Share prefab buffers/materials but
+          // give each transparent record its own render object and world transform.
+          // Self/intersecting surfaces still have ordinary alpha-sorting limits.
+          for (const it of items) {
+            const mesh = new THREE.Mesh(geometry, material);
+            mesh.matrixAutoUpdate = false; mesh.matrix.fromArray(objectMatrix('furniture', it)); mesh.matrixWorldNeedsUpdate = true;
+            mesh.castShadow = mesh.receiveShadow = true;
+            mesh.userData = { kind: 'furniture', owner: () => it }; grp.add(mesh);
+          }
+        } else {
+          const im = new THREE.InstancedMesh(geometry, material, items.length);
+          items.forEach((it, i) => im.setMatrixAt(i, matrix.fromArray(objectMatrix('furniture', it))));
+          im.castShadow = im.receiveShadow = true;
+          im.instanceMatrix.needsUpdate = true; im.computeBoundingBox(); im.computeBoundingSphere();
+          im.userData = { kind: 'furniture', owner: (i) => items[i] }; grp.add(im);
+        }
       }
     }
+    for (const [key, material] of this.propMats) if (!usedMaterials.has(material)) { material.dispose(); this.propMats.delete(key); }
   }
 
   // ---------------------------------------------------------------- building materials (from defs.materials)
   material(m, fac) {
-    const key = m + '|' + (fac ?? '');
+    const d = this.defs.materials?.[m] ?? {};
+    // Colour lives in vertices, so ordinary palette variants share a draw call.
+    // Emissive colour/intensity and opacity remain part of the material descriptor.
+    const key = JSON.stringify([fac ?? '', d.roughness ?? this.legacyRoughness(d), d.metalness ?? 0,
+      d.opacity ?? 1, d.emissive ?? '', d.emissiveIntensity ?? 0, d.glow ?? 0, d.nightGlow ?? 0,
+      d.glow || d.nightGlow ? d.color : '']);
     let mat = this.mats.get(key);
-    if (!mat) { mat = new THREE.MeshPhongMaterial(); mat.userData = { m, fac }; this.styleMaterial(mat); this.mats.set(key, mat); }
+    if (!mat) {
+      mat = new THREE.MeshStandardMaterial({ vertexColors: true });
+      mat.userData = { m, fac }; this.styleMaterial(mat); this.mats.set(key, mat);
+    }
     return mat;
   }
+  legacyRoughness(d) { return Math.max(0.12, Math.min(1, Math.sqrt(2 / ((d.shininess ?? 5) + 2)))); }
   styleMaterial(mat) {
     const { m, fac } = mat.userData, d = this.defs.materials?.[m] ?? {};
     const tx = fac ? this.facades[fac] : null, glows = (d.glow || d.nightGlow) > 0;
-    mat.color.set(d.color ?? MISSING);
-    mat.shininess = d.shininess ?? 5;
-    mat.specular.set(d.specular ?? 0x111111);
+    mat.color.set(0xffffff);
+    mat.roughness = d.roughness ?? this.legacyRoughness(d); mat.metalness = d.metalness ?? 0;
+    mat.opacity = d.opacity ?? 1; mat.transparent = mat.opacity < 1; mat.depthWrite = !mat.transparent;
     mat.map = tx?.map ?? null;
+    mat.bumpMap = this.quality === 'low' ? null : tx?.bumpMap ?? null;
+    mat.bumpScale = 0.075;
     mat.emissiveMap = tx?.emissiveMap ?? null;
-    mat.emissive.set(glows ? (d.color ?? MISSING) : tx?.emissiveMap ? 0xffffff : 0x000000);
-    mat.emissiveIntensity = glows ? (this.night ? d.nightGlow : d.glow) ?? 0 : tx?.emissiveMap && this.night ? 1 : 0;
-    if (mat.flatShading !== !tx) { mat.flatShading = !tx; }
+    mat.emissive.set(d.emissive ?? (glows ? d.color ?? MISSING : tx?.emissiveMap ? 0xffffff : 0x000000));
+    mat.emissiveIntensity = d.emissiveIntensity ?? (glows ? (this.night ? d.nightGlow : d.glow) ?? 0 : tx?.emissiveMap && this.night ? 1 : 0);
     mat.needsUpdate = true;
   }
-  /** Regenerate the facade textures from defs.facades (in place, so materials keep them). */
-  refreshFacades() { facadeTextures(this.defs.facades, this.anisotropy, this.facades); for (const mat of this.mats.values()) this.styleMaterial(mat); }
-  /** Re-apply defs (colours, glow, surface colours) to every live material. */
+  /** Regenerate shared canvas textures; do not recreate a texture for each building. */
+  refreshFacades() {
+    facadeTextures(this.defs.facades, this.anisotropy, this.facades);
+    // Facade names/styles may also have changed the material assignment.
+    this.refreshMaterials();
+  }
   refreshMaterials() {
-    for (const mat of this.mats.values()) this.styleMaterial(mat);
+    const old = [...new Set(this.mats.values())]; this.mats.clear();
+    if (this.L.buildings) this.buildBlocks();
+    disposeRenderObjects([], { extra: old });
+    if (this.L.furniture) this.buildFurniture();
     for (const [m, mat] of this.smats) mat.color.set(this.defs.surfaces?.[m]?.color ?? MISSING);
     for (const [name, m] of this.rmats) m.color.set(this.defs.roadMaterials?.[name]?.color ?? MISSING);
   }
-  setNight(on) { this.night = on; for (const mat of this.mats.values()) this.styleMaterial(mat); }
+  setNight(on) {
+    this.night = on; for (const mat of this.mats.values()) this.styleMaterial(mat);
+    for (const mat of this.propMats.values()) mat.emissiveIntensity = on ? mat.userData.pbr.night : mat.userData.pbr.day;
+  }
+  setQuality(quality) {
+    if (!['low', 'medium', 'high'].includes(quality)) throw new Error('quality must be low, medium or high');
+    this.quality = quality; this.buildBlocks();
+    for (const mat of this.mats.values()) this.styleMaterial(mat);
+  }
+  /** Cheap distance LOD for relief geometry; shell and picking remain present. */
+  update(camera) {
+    if (!camera) return;
+    this.terrainChunks?.update(camera, this.quality);
+    const at = camera.getWorldPosition(new THREE.Vector3());
+    for (const t of this.tiles.blocks.values()) {
+      if (!t.obj) continue;
+      const bounds = t.obj.userData.bounds;
+      const range = this.detailDistance * (this.quality === 'high' ? 2 : 1);
+      const threshold = range * (t.obj.userData.detailVisible === false ? 0.85 : 1.15);
+      const near = this.quality !== 'low' && (!bounds || bounds.distanceToPoint(at) < threshold);
+      t.obj.userData.detailVisible = near;
+      t.obj.traverse((o) => { if (o.userData.detail) o.visible = near; });
+    }
+  }
+  /** Structural counts; renderer.info is still authoritative for visible GPU draws. */
+  stats() {
+    const stats = { meshes: 0, instances: 0, triangles: 0, materials: new Set(), buildingMeshes: 0, cells: this.tiles.blocks.size };
+    for (const name of ['terrain', 'roads', 'furniture', 'buildings']) this.groups[name].traverse((o) => {
+      if (!o.isMesh) return;
+      stats.meshes++; if (o.userData.kind === 'building') stats.buildingMeshes++;
+      const n = o.isInstancedMesh ? o.count : 1; stats.instances += o.isInstancedMesh ? n : 0;
+      stats.triangles += (o.geometry.index?.count ?? o.geometry.attributes.position?.count ?? 0) / 3 * n;
+      for (const m of Array.isArray(o.material) ? o.material : [o.material]) stats.materials.add(m);
+    });
+    stats.materials = stats.materials.size;
+    return stats;
+  }
+  clearGroup(grp) { disposeRenderObjects([grp]); grp.clear(); }
+  removeTicker(key) {
+    const index = this.tickers.indexOf(this[key]); if (index >= 0) this.tickers.splice(index, 1);
+    this[key] = null;
+  }
+  dispose() {
+    if (this.disposed) return; this.disposed = true;
+    this.removeTicker('trainTick'); this.removeTicker('windTick');
+    const roots = ['terrain', 'roads', 'furniture', 'buildings'].map((n) => this.groups[n]);
+    const extra = [this.terrainGeo, ...this.mats.values(), ...this.propMats.values(), ...this.smats.values(), ...this.rmats.values(), ...Object.values(this.facades).flatMap(Object.values)];
+    disposeRenderObjects(roots, { textures: true, extra });
+    for (const root of roots) root.removeFromParent();
+    for (const group of Object.values(this.groups)) group.clear();
+    this.mats.clear(); this.propMats.clear(); this.smats.clear(); this.rmats.clear(); this.facades = {};
+    for (const tiles of Object.values(this.tiles)) tiles.clear();
+    this.roadTiles.clear(); this.roadTileOf.clear(); this.tileOf.clear(); this.hidden.clear();
+    this.terrainMesh = this.terrainGeo = this.terrainChunks = this.terrainRenderMaterial = this.roadWorld = this.bentObj = null;
+  }
 
   // ---------------------------------------------------------------- tiles
   keyOf(x, y) { return this.tileSize === Infinity ? '0' : Math.floor(x / this.tileSize) + ',' + Math.floor(y / this.tileSize); }
   recKey(kind, rec) {
-    const p = kind === 'blocks' ? rec.parts?.[0]?.p?.[0] : rec.p?.[0];
+    const p = kind === 'blocks' ? buildingCenter(rec) : rec.p?.[0];
     return p ? this.keyOf(p[0], p[1]) : '0';
   }
   buildTiled(kind, recs, build) {
     const tiles = this.tiles[kind];
-    for (const t of tiles.values()) this.disposeTile(t);
+    for (const t of tiles.values()) { this.disposeTile(t); for (const rec of t.recs) this.tileOf.delete(rec); }
     tiles.clear(); this.groups[kind].clear();
     for (const rec of recs) this.place(kind, rec);
     for (const key of tiles.keys()) this.buildTile(kind, key, build);
@@ -484,11 +610,12 @@ export class World3D {
     tiles.get(key).recs.add(rec); this.tileOf.set(rec, key);
     return key;
   }
-  disposeTile(t) { if (t.obj) { t.obj.traverse((o) => o.isMesh && o.geometry.dispose()); t.obj.removeFromParent(); t.obj = null; } }
+  disposeTile(t) { if (t.obj) { disposeRenderObjects([t.obj], { materials: false }); t.obj.removeFromParent(); t.obj = null; } }
   buildTile(kind, key, build = kind === 'blocks' ? this.blockTile : this.surfaceTile) {
     const t = this.tiles[kind].get(key);
     if (!t) return;
     this.disposeTile(t);
+    if (!t.recs.size) { this.tiles[kind].delete(key); return; }
     t.obj = build.call(this, [...t.recs].filter((r) => !this.hidden.has(r)));
     this.groups[kind].add(t.obj);
   }
@@ -501,28 +628,48 @@ export class World3D {
     return keys;
   }
   /** A record was changed/added/removed: re-tile it and rebuild the affected tiles. */
-  touch(kind, rec, removed = false) { for (const k of this.retile(kind, rec, removed)) this.buildTile(kind, k); }
+  touch(kind, rec, removed = false) {
+    for (const k of this.retile(kind, rec, removed)) this.buildTile(kind, k);
+    if (kind === 'surfaces') this.terrainChunks?.setSurfaces(this.L.buildings.surfaces);
+  }
 
-  blockTile(recs) {
+  blockTile(recs, { local = false } = {}) {
     const grp = new THREE.Group(), byMat = new Map();
-    const push = (key, g, rec) => { if (!byMat.has(key)) byMat.set(key, []); byMat.get(key).push({ g, rec }); };
-    for (const it of recs) for (const pt of it.parts ?? []) {
-      if (!(pt.p?.length >= 3)) continue;
-      let g;
-      try {
-        const g0 = new THREE.ExtrudeGeometry(shapeOf(pt.p, pt.holes), { depth: pt.h ?? 3, bevelEnabled: false });
-        g0.translate(0, 0, pt.z ?? 0); g = g0.index ? g0.toNonIndexed() : g0; if (g !== g0) g0.dispose();
-      } catch { continue; }                 // a broken outline must not take the tile down
-      const fac = facadeFor(this.defs, pt.m, it.type);
-      if (!fac) { push(pt.m + '|', g, it); continue; }
-      for (const gi of g.groups) push(gi.materialIndex === 1 ? pt.m + '|' + fac : pt.m + '|', sliceGeometry(g, gi.start, gi.count), it);
-      g.dispose();
+    const mode = this.quality === 'low' ? 'none' : this.quality === 'high' && this.detail !== 'none' ? 'high' : this.detail;
+    for (const it of recs) {
+      ensureLocalBuilding(it);
+      const matrix = new THREE.Matrix4().fromArray(buildingMatrix(it));
+      let pieces;
+      try { pieces = buildingGeometries(it, { detail: mode }); }
+      catch (error) { console.warn('Skipping invalid building geometry', it.id ?? it.type, error); continue; }
+      for (const { g, m, role } of pieces) {
+        const fac = role === 'wall' ? facadeFor(this.defs, m, it.type) : null;
+        const material = this.material(m, fac), detail = role === 'detail';
+        if (!byMat.has(material)) byMat.set(material, new Map());
+        const owners = byMat.get(material), ownerKey = material.transparent ? it : null;
+        if (!owners.has(ownerKey)) owners.set(ownerKey, [[], []]);
+        const c = color(this.defs.materials?.[m]?.color), count = g.attributes.position.count, colors = new Float32Array(count * 3);
+        for (let i = 0; i < colors.length; i += 3) { colors[i] = c.r; colors[i + 1] = c.g; colors[i + 2] = c.b; }
+        g.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+        if (!local) g.applyMatrix4(matrix);
+        owners.get(ownerKey)[detail ? 1 : 0].push({ g, rec: it });
+      }
     }
-    for (const [key, entries] of byMat) {
-      const [m, fac] = key.split('|');
-      grp.add(ownedMesh(entries, this.material(m, fac || null), 'building'));
-    }
+    // Opaque geometry remains tile/material merged. Transparent geometry is merged
+    // only within one authored building, enabling Three's per-object depth sort.
+    // This is object sorting, not order-independent transparency for self/intersections.
+    for (const [material, owners] of byMat) for (const levels of owners.values()) levels.forEach((entries, detail) => {
+      if (!entries.length) return;
+      const mesh = ownedMesh(entries, material, 'building'); mesh.userData.detail = !!detail; grp.add(mesh);
+    });
+    grp.userData.bounds = new THREE.Box3().setFromObject(grp);
     return grp;
+  }
+  /** Standalone local preview: update its matrix during transform drags, no geometry rebuild. */
+  buildingPreview(rec) {
+    const group = this.blockTile([rec], { local: true });
+    group.matrixAutoUpdate = false; group.matrix.fromArray(buildingMatrix(rec)); group.updateMatrixWorld(true);
+    return group;
   }
   buildBlocks() { this.buildTiled('blocks', this.L.buildings.items ?? []); }
 
@@ -543,38 +690,47 @@ export class World3D {
     }
     return grp;
   }
-  buildSurfaces() { this.buildTiled('surfaces', this.L.buildings.surfaces ?? []); }
+  buildSurfaces() {
+    this.buildTiled('surfaces', this.L.buildings.surfaces ?? []);
+    this.terrainChunks?.setSurfaces(this.L.buildings.surfaces);
+  }
 
   // ---------------------------------------------------------------- trees: two crown shapes, random scale and tint
   buildTrees() {
-    const grp = this.groups.trees;
-    grp.traverse((o) => o.isMesh && o.geometry.dispose()); grp.clear();
-    const T = (this.L.buildings.trees ?? []).filter((t) => !this.hidden.has(t)), n = T.length;
-    if (!n) return;
+    const grp = this.groups.trees; this.clearGroup(grp);
+    const cells = new Map();
+    (this.L.buildings.trees ?? []).forEach((rec, index) => {
+      if (this.hidden.has(rec)) return;
+      const key = this.keyOf(...rec);
+      if (!cells.has(key)) cells.set(key, []); cells.get(key).push({ rec, index });
+    });
+    if (!cells.size) return;
     const trunk = new THREE.CylinderGeometry(0.18, 0.25, 3, 5); trunk.rotateX(Math.PI / 2); trunk.translate(0, 0, 1.5);
     const crowns = [new THREE.IcosahedronGeometry(2.6, 0), new THREE.ConeGeometry(2.2, 6, 6).rotateX(Math.PI / 2)];
     crowns[0].translate(0, 0, 4.6); crowns[1].translate(0, 0, 5.5);
-    const tm = new THREE.InstancedMesh(trunk, new THREE.MeshLambertMaterial({ color: 0x5a4330 }), n);
-    const cm = crowns.map((c) => new THREE.InstancedMesh(c, new THREE.MeshLambertMaterial({ color: 0xffffff }), n));
+    const wood = new THREE.MeshLambertMaterial({ color: 0x5a4330 }), leaves = new THREE.MeshLambertMaterial({ color: 0xffffff });
     const m4 = new THREE.Matrix4(), q = new THREE.Quaternion(), v = new THREE.Vector3(), sc = new THREE.Vector3(), col = new THREE.Color();
-    const cnt = [0, 0], who = [[], []];
-    T.forEach(([x, y, z], i) => {
-      const s = 0.7 + ((i * 7919) % 100) / 160, k = (i * 31) % 3 === 0 ? 1 : 0;
-      m4.compose(v.set(x, y, z - 0.3), q, sc.set(s, s, s));
-      tm.setMatrixAt(i, m4);
-      who[k].push(T[i]);
-      cm[k].setMatrixAt(cnt[k], m4);
-      cm[k].setColorAt(cnt[k]++, col.setHSL(0.24 + ((i * 13) % 10) / 100, 0.45, 0.22 + ((i * 17) % 10) / 100));
-    });
-    cm.forEach((c, k) => { c.count = cnt[k]; if (c.instanceColor) c.instanceColor.needsUpdate = true; c.userData = { kind: 'tree', owner: (i) => who[k][i] }; c.computeBoundingSphere(); });
-    tm.userData = { kind: 'tree', owner: (i) => T[i] }; tm.computeBoundingSphere();
-    grp.add(tm, ...cm);
+    for (const T of cells.values()) {
+      const tm = new THREE.InstancedMesh(trunk, wood, T.length);
+      const cm = crowns.map((c) => new THREE.InstancedMesh(c, leaves, T.length));
+      const cnt = [0, 0], who = [[], []];
+      T.forEach(({ rec: [x, y, z], rec, index: i }, slot) => {
+        const s = 0.7 + ((i * 7919) % 100) / 160, k = (i * 31) % 3 === 0 ? 1 : 0;
+        m4.compose(v.set(x, y, z - 0.3), q, sc.set(s, s, s)); tm.setMatrixAt(slot, m4);
+        who[k].push(rec); cm[k].setMatrixAt(cnt[k], m4);
+        cm[k].setColorAt(cnt[k]++, col.setHSL(0.24 + ((i * 13) % 10) / 100, 0.45, 0.22 + ((i * 17) % 10) / 100));
+      });
+      cm.forEach((c, k) => { c.count = cnt[k]; if (c.instanceColor) c.instanceColor.needsUpdate = true; c.userData = { kind: 'tree', owner: (i) => who[k][i] }; });
+      tm.userData = { kind: 'tree', owner: (i) => T[i].rec };
+      for (const im of [tm, ...cm]) { im.castShadow = im.receiveShadow = true; im.instanceMatrix.needsUpdate = true; im.computeBoundingBox(); im.computeBoundingSphere(); }
+      grp.add(tm, ...cm);
+    }
   }
 
   // ---------------------------------------------------------------- railway: ballast bed + two rails
   buildRails() {
     const grp = this.groups.rails;
-    grp.traverse((o) => o.isMesh && o.geometry.dispose()); grp.clear();
+    this.clearGroup(grp);
     const bed = new THREE.MeshLambertMaterial({ color: 0x6b645a, side: THREE.DoubleSide });
     const steel = new THREE.MeshPhongMaterial({ color: 0xb8bcc0, shininess: 80, side: THREE.DoubleSide });
     const concrete = new THREE.MeshLambertMaterial({ color: 0xa8a59e, side: THREE.DoubleSide });
@@ -602,17 +758,18 @@ export class World3D {
       const im = new THREE.InstancedMesh(box, concrete, piers.length);
       const m4 = new THREE.Matrix4(), q = new THREE.Quaternion(), v = new THREE.Vector3(), sc = new THREE.Vector3(), Z = new THREE.Vector3(0, 0, 1);
       piers.forEach(({ q: p }, i) => im.setMatrixAt(i, m4.compose(v.set(p.x, p.y, p.z0), q.setFromAxisAngle(Z, p.a), sc.set(1, 1, p.z1 - p.z0))));
-      im.computeBoundingSphere();
+      im.castShadow = im.receiveShadow = true; im.computeBoundingSphere();
       im.userData = { kind: 'rail', owner: (i) => piers[i].pts };
       grp.add(im);
     }
+    grp.traverse((o) => { if (o.isMesh) o.castShadow = o.receiveShadow = true; });
   }
 
   // ---------------------------------------------------------------- wind turbines: rotors spun by a ticker
   buildWind() {
     const grp = this.groups.wind;
-    grp.traverse((o) => o.isMesh && o.geometry.dispose()); grp.clear();
-    if (this.windTick) this.tickers.splice(this.tickers.indexOf(this.windTick), 1), this.windTick = null;
+    this.clearGroup(grp);
+    this.removeTicker('windTick');
     const WT = (this.L.buildings.wind ?? []).filter((w) => !this.hidden.has(w));
     if (!WT.length) return;
     const tower = new THREE.CylinderGeometry(1.4, 2.4, 80, 10); tower.rotateX(Math.PI / 2); tower.translate(0, 0, 40);
@@ -626,6 +783,7 @@ export class World3D {
     WT.forEach(([x, y, z], i) => { m4.compose(v.set(x, y, z), yaw, sc); tm.setMatrixAt(i, m4); nm.setMatrixAt(i, m4); });
     for (const im of [tm, nm]) { im.computeBoundingSphere(); im.userData = { kind: 'wind', owner: (i) => WT[i] }; }
     bm.userData = { kind: 'wind', owner: (i) => WT[(i / 3) | 0] };
+    for (const im of [tm, nm, bm]) im.castShadow = im.receiveShadow = true;
     grp.add(tm, nm, bm);
     const axis = new THREE.Vector3(1, 0, 0).applyQuaternion(yaw), qb = new THREE.Quaternion(), hubOff = new THREE.Vector3(3.5, 0, 81).applyQuaternion(yaw);
     const spin = (t) => {
@@ -645,8 +803,9 @@ export class World3D {
   // ---------------------------------------------------------------- trains: loco + coaches following route polylines (closed = loop, open = shuttle)
   buildTrains() {
     const grp = this.groups.trains;
-    grp.traverse((o) => o.isMesh && o.geometry.dispose()); grp.clear();
-    if (this.trainTick) this.tickers.splice(this.tickers.indexOf(this.trainTick), 1), this.trainTick = null;
+    this.clearGroup(grp);
+    this.removeTicker('trainTick');
+    if (!this.showTrains) return;
     const routes = (this.L.buildings.trains ?? []).filter((r) => r.pts?.length >= 2 && !this.hidden.has(r));
     if (!routes.length) return;
     const CARS = 7, LEN = 23, body = new THREE.BoxGeometry(21.5, 3.1, 3.8); body.translate(0, 0, 2.3);
@@ -672,7 +831,7 @@ export class World3D {
       const a = t.P[lo], b = t.P[hi], u = (s - t.S[lo]) / Math.max(t.S[hi] - t.S[lo], 1e-6);
       return [a[0] + (b[0] - a[0]) * u, a[1] + (b[1] - a[1]) * u, a[2] + (b[2] - a[2]) * u, Math.atan2(b[1] - a[1], b[0] - a[0])];
     };
-    this.tickers.push(this.trainTick = (sec) => {
+    const animate = (sec) => {
       trains.forEach((t, ti) => {
         let head, dir = 1;
         if (t.closed) head = (sec * t.speed + t.phase * t.L) % t.L;
@@ -688,7 +847,9 @@ export class World3D {
         }
       });
       mBody.instanceMatrix.needsUpdate = mRoof.instanceMatrix.needsUpdate = true;
-    });
+    };
+    animate(0);
+    if (this.animateTrains) this.tickers.push(this.trainTick = animate);
   }
 
   // ---------------------------------------------------------------- power lines: posts + wires derived from the route; loose cables as stored
@@ -715,11 +876,12 @@ export class World3D {
       }
       for (const [h, l] of T.arms) for (const sy of [1, -1]) parts.push(leg(0, sy * 1, 0, sy * l, h, h + 0.6, 0.35), leg(0, sy * 1, 0, sy * l, h + 2.6, h + 0.6, 0.18));
     }
-    return mergeGeometries(parts.map((g) => g.index ? g.toNonIndexed() : g));
+    const flat = parts.map((g) => { if (!g.index) return g; const n = g.toNonIndexed(); g.dispose(); return n; });
+    const merged = mergeGeometries(flat); flat.forEach((g) => g.dispose()); return merged;
   }
   buildCables() {
     const grp = this.groups.cables;
-    grp.traverse((o) => o.geometry?.dispose()); grp.clear();
+    this.clearGroup(grp);
     const cab = [], H = this.H ?? (() => 0), posts = {};
     for (const rec of this.L.buildings.powerlines ?? []) {
       if (this.hidden.has(rec)) continue;
@@ -731,7 +893,7 @@ export class World3D {
     for (const [type, list] of Object.entries(posts)) {
       const im = new THREE.InstancedMesh(this.postGeometry(type), new THREE.MeshLambertMaterial({ color: type === 'pole' ? 0x6b5640 : 0x8d9296 }), list.length);
       list.forEach(({ p }, i) => im.setMatrixAt(i, m4.compose(v.set(p.x, p.y, p.z), q.setFromAxisAngle(Z, p.a), one)));
-      im.computeBoundingSphere();
+      im.castShadow = im.receiveShadow = true; im.computeBoundingSphere();
       im.userData = { kind: 'powerline', owner: (i) => list[i].rec };
       grp.add(im);
     }

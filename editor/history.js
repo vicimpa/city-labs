@@ -3,16 +3,16 @@
 export const clone = (v) => structuredClone(v);
 
 export function restore(rec, snap) {
-  if (Array.isArray(rec)) { rec.length = 0; rec.push(...clone(snap)); return; }
+  if (Array.isArray(rec)) { const values = clone(snap); rec.length = 0; for (const value of values) rec.push(value); return; }
   for (const k of Object.keys(rec)) delete rec[k];
   Object.assign(rec, clone(snap));
 }
 
 export class History {
-  constructor(onChange) { this.done = []; this.undone = []; this.onChange = onChange; }
+  constructor(onChange = () => {}) { this.done = []; this.undone = []; this.onChange = onChange; }
   push(cmd) { this.done.push(cmd); this.undone.length = 0; if (this.done.length > 300) this.done.shift(); this.onChange(cmd, 'do'); }
-  undo() { const c = this.done.pop(); if (!c) return; c.undo(); this.undone.push(c); this.onChange(c, 'undo'); }
-  redo() { const c = this.undone.pop(); if (!c) return; c.redo(); this.done.push(c); this.onChange(c, 'redo'); }
+  undo() { const c = this.done.at(-1); if (!c) return; c.undo(); this.done.pop(); this.undone.push(c); this.onChange(c, 'undo'); }
+  redo() { const c = this.undone.at(-1); if (!c) return; c.redo(); this.undone.pop(); this.done.push(c); this.onChange(c, 'redo'); }
 
   /** Start a free-form edit of `rec`; call .commit(label) when done (no-op if nothing changed). */
   begin(kind, rec, refresh) {
@@ -22,7 +22,7 @@ export class History {
       if (JSON.stringify(before) === JSON.stringify(after)) return false;
       this.push({ label, kind, rec, undo: () => { restore(rec, before); refresh(); }, redo: () => { restore(rec, after); refresh(); } });
       return true;
-    }, cancel: () => { restore(rec, before); refresh(); } };
+    }, cancel: (refreshView = true) => { restore(rec, before); if (refreshView) refresh(); } };
   }
   /** Like begin() over several records that change together (a node and the roads ending at it). */
   beginGroup(kind, recs, refresh) {
@@ -33,10 +33,15 @@ export class History {
       this.push({ label, kind, rec: recs[0], undo: () => { recs.forEach((r, i) => restore(r, before[i])); refresh(); },
         redo: () => { recs.forEach((r, i) => restore(r, after[i])); refresh(); } });
       return true;
-    }, cancel: () => { recs.forEach((r, i) => restore(r, before[i])); refresh(); } };
+    }, cancel: (refreshView = true) => { recs.forEach((r, i) => restore(r, before[i])); if (refreshView) refresh(); } };
   }
   /** One-shot edit: fn(rec) mutates. */
-  edit(kind, rec, fn, label, refresh) { const t = this.begin(kind, rec, refresh); fn(rec); refresh(); return t.commit(label); }
+  edit(kind, rec, fn, label, refresh) {
+    const t = this.begin(kind, rec, refresh);
+    let refreshing = false;
+    try { fn(rec); refreshing = true; refresh(); return t.commit(label); }
+    catch (error) { t.cancel(refreshing); throw error; }
+  }
 
   insert(kind, list, rec, index, label, refresh) {
     const i = index ?? list.length;

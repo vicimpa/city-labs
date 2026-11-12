@@ -1,32 +1,41 @@
 // Vespera world editor: edits the VSPB world in place, keeps a working copy in IndexedDB,
 // downloads / writes back .vspb. Scene code is shared with the viewer (viewer/world3d.js).
 import * as THREE from 'three';
+import './desktop.js';
 import { MapControls } from 'three/examples/jsm/controls/MapControls.js';
 import { World3D } from '../viewer/world3d.js';
 import { decodeWorld, encodeWorldLayer, assemble, emptyWorld, gridStep, LAYERS } from '../format/world.js';
 import { loadWorking, saveWorking, dropWorking } from './store.js';
 import { History, clone } from './history.js';
 import { KINDS, suggestions } from './kinds.js';
-import { RoadTx, addRoad, reprofile, deleteEdge, deleteNode, edgesAt, followEnd } from './roadedit.js';
+import { RoadTx, addRoad, reprofile, deleteEdge, deleteNode, edgesAt, snapEnd, splitEdge } from './roadedit.js';
 import { bbox } from '../world/roadworld.js';
 import { syncClassWidths, groundSampler } from '../world/roadnet.js';
 import { carveRegion } from '../world/carve.js';
 import { cumLength, smoothstep } from '../world/geom.js';
-import { controlIndices, reshape } from '../world/spline.js';
+import { controlIndices } from '../world/spline.js';
 import { filletPath, resample, levelFlags, SPACING } from '../world/profile.js';
 import { layPosts, POWER_TYPES } from '../world/power.js';
 import { runTool, TOOL_BY_NAME } from '../mcp/ops.js';
 import { runScript, SCRIPT_API } from '../mcp/script.js';
 import { GENERATORS, GENERATOR_BY_ID, runGenerator } from '../mcp/generators.js';
 import { inspector, h } from './inspector.js';
+import { renderMaterialEditor } from './materials.js';
 import { facadeCanvases } from '../viewer/facades.js';
 import { exportGlb, exportPng, exportJson } from './export.js';
 import { t, getLang, setLang, onLang, applyDom, LANGS } from './i18n.js';
+import { buildingMatrix, localToWorld, transformOf, validateTransform } from '../format/transforms.js';
+import { validateRecord, validateDefChange, safeKey } from '../format/validate.js';
+import { transformRecord, assignMaterial, reshapeCurve, roadMetrics, finalizeRecordEdit } from './commands.js';
+import { terrainPatch } from '../world/terrain-edit.js';
+import { cityLighting } from '../viewer/lighting.js';
+import './viewport.css';
+import { roadPreview, polygonIssue } from './road-preview.js';
 
 const SRC = '/city/data/vespera.vspb', TILE = 600;
 // the sample city: the repo's file on the dev server, a copy next to the page in the web build
 const SAMPLE = import.meta.env?.DEV ? SRC : 'samples/vespera.vspb';
-// desktop app (app/preload.cjs): the world is a file on disk, saved explicitly; MCP calls arrive here
+// Tauri desktop bridge: the world is a file on disk, saved explicitly; MCP calls arrive here.
 const host = window.vspbHost ?? null;
 const $ = (id) => document.getElementById(id);
 const r2 = (v) => Math.round(v * 100) / 100;
@@ -53,10 +62,7 @@ controls.maxDistance = 25000;
 controls.maxPolarAngle = Math.PI * 0.49;
 controls.target.set(0, 0, 0);
 controls.update();
-const hemi = new THREE.HemisphereLight(0xcfd8e6, 0x2a2f25, 1.1);
-const sun = new THREE.DirectionalLight(0xffe2c0, 1.6);
-sun.position.set(-3000, -2000, 4000);
-scene.add(hemi, sun);
+const lighting = cityLighting(renderer, scene);
 
 const tickers = [];
 const roadGraph = new THREE.Group(); roadGraph.name = 'roadGraph';
@@ -66,6 +72,16 @@ scene.add(roadGraph, selGroup, draft);
 
 // ---------------------------------------------------------------- state
 let doc = null, world = null;
+let materialPanel = null;
+let preservePropertyInputs = false;
+let changingPropertyControl = null;
+// During blur/change, Chromium may temporarily report BODY as activeElement.
+// Capture the event's real control before its mutation callback runs.
+$('pane-props').addEventListener('change', (event) => {
+  if (!event.target.matches('input,select')) return;
+  changingPropertyControl = event.target;
+  setTimeout(() => { changingPropertyControl = null; }, 0);
+}, true);
 // where the open world came from: { kind: 'new' | 'sample' | 'browser', when? } or { kind: 'file', path }
 let source = { kind: 'new' };
 const sourcePath = () => (source.kind === 'file' ? source.path : null);
@@ -90,11 +106,13 @@ let drag = null;                       // active pointer gesture
 let draw = null;                       // polyline being drawn by a create tool
 let handles = [], hover = null;        // vertex handles of the selection
 const hist = new History(onHistory);
-const vis = { terrain: true, roads: true, furniture: true, blocks: true, surfaces: true, trees: true, rails: true, wind: true, trains: true, cables: true, roadGraph: true, grid: true };
+const vis = { terrain: true, roads: true, furniture: true, blocks: true, surfaces: true, trees: true, rails: true, wind: true, cables: true, roadGraph: true, grid: true };
 
 const OPTS = { snap: true, soft: 40, ctrl: true, ctrlTol: 1.5, railR: 300, pType: 'tower', pSpan: 320, rCls: 'street', rName: '', bType: 'block', bZone: 'midtown', bMat: 'concrete', bH: 18, sMat: 'plaza', fType: 'lamp', fRot: 0,
-  brush: 'raise', radius: 40, strength: 6 };
+  brush: 'raise', radius: 40, strength: 6, gridSnap: false, gridStep: 1, rElevation: 0, roadSnap: true };
 const opts = { ...OPTS };
+let renderQuality = 'medium';
+try { const q = localStorage.getItem('city-labs-quality'); if (['low', 'medium', 'high'].includes(q)) renderQuality = q; } catch { /* private mode */ }
 try { Object.assign(opts, JSON.parse(localStorage.getItem('vspb-editor-opts') ?? '{}')); } catch { /* private mode */ }
 const saveOpts = () => { try { localStorage.setItem('vspb-editor-opts', JSON.stringify(opts)); } catch { /* ignore */ } };
 
@@ -129,20 +147,27 @@ async function boot() {
 function frameWorld() {
   const T = doc.layers.terrain;
   if (!T) return;
-  const w = (T.nx - 1) * T.res, cx = T.x0 + w / 2, cy = T.y0 + ((T.ny - 1) * T.res) / 2, z = T.h[(T.ny >> 1) * T.nx + (T.nx >> 1)] ?? 0;
+  const width = (T.nx - 1) * T.res, depth = (T.ny - 1) * T.res, w = Math.max(width, depth);
+  const cx = T.x0 + width / 2, cy = T.y0 + depth / 2, z = T.h[(T.ny >> 1) * T.nx + (T.nx >> 1)] ?? 0;
+  camera.far = Math.max(40000, w * 4); camera.updateProjectionMatrix(); controls.maxDistance = Math.max(25000, w * 2.5);
   controls.target.set(cx, cy, z);
   camera.position.set(cx - w * 0.08, cy - w * 0.55, z + w * 0.45);
   controls.update();
 }
 function setDoc(d, ch, src, { frame = true } = {}) {
+  cancelGesture();
+  world?.dispose();
   if (world) for (const n of ['terrain', 'roads', 'furniture', 'buildings']) scene.remove(world.groups[n]);
   tickers.length = 0;
   doc = d; chunks = { ...ch }; source = src;
+  for (const name of doc.migratedLayers ?? []) delete chunks[name];
   dirty.clear(); roadBoxes.clear();
   for (const e of doc.layers.roads?.edges ?? []) roadBoxes.set(e, bbox(e.pts));
-  world = new World3D(doc, { anisotropy: renderer.capabilities.getMaxAnisotropy(), tileSize: TILE, tickers, grid: vis.grid }).buildAll();
+  world = new World3D(doc, { anisotropy: renderer.capabilities.getMaxAnisotropy(), tileSize: TILE, tickers, grid: vis.grid, quality: renderQuality, showTrains: false, animateTrains: false }).buildAll();
   for (const n of ['terrain', 'roads', 'furniture', 'buildings']) scene.add(world.groups[n]);
   applyVisibility();
+  applyQuality(renderQuality); lighting.setNight(false);
+  if (doc.layers.terrain) scene.fog.density = Math.min(0.000065, 1.5 / Math.max((doc.layers.terrain.nx - 1) * doc.layers.terrain.res, (doc.layers.terrain.ny - 1) * doc.layers.terrain.res));
   buildRoadGraph();
   hist.done.length = 0; hist.undone.length = 0;
   sel = null; draw = null; drag = null;
@@ -151,7 +176,7 @@ function setDoc(d, ch, src, { frame = true } = {}) {
   updateUndo(); renderDefs(); renderLayers(); renderFind(); renderScript(); renderGen(); select(null); setTool(tool);
 }
 
-let saveTimer = 0, saving = false, savedAt = 0, unsaved = false, saveState = 'clean';
+let saveTimer = 0, saving = false, changingFile = false, savedAt = 0, unsaved = false, saveState = 'clean', saveCompletion = null;
 function setSaveState(s, at) {
   const el = $('save');
   if (at) savedAt = at;
@@ -172,18 +197,25 @@ function markDirty(layer) {
 
 // re-encode the layers changed since the last save (encoding is synchronous up to compression: a consistent snapshot)
 async function encodeChunks() {
+  const jobs = [];
   for (const name of Object.keys(doc.layers)) {
     if (!dirty.has(name) && chunks[name]) continue;
     dirty.delete(name);
-    chunks[name] = await encodeWorldLayer(doc, name);
+    // Start every encoder before yielding: all dirty layers describe the same
+    // document state, even if an edit arrives while compression is in flight.
+    jobs.push(encodeWorldLayer(doc, name).then((bytes) => { chunks[name] = bytes; }, (error) => { dirty.add(name); throw error; }));
   }
+  const results = await Promise.allSettled(jobs);
+  const failed = results.find((r) => r.status === 'rejected'); if (failed) throw failed.reason;
   for (const name of Object.keys(chunks)) if (!doc.layers[name]) delete chunks[name];
 }
 
 /** Save: to IndexedDB in the browser, to the file in the app (as: pick a new path). Returns false if nothing was written. */
 async function saveNow({ as = false } = {}) {
   clearTimeout(saveTimer);
-  if (drag || saving) { if (!host) saveTimer = setTimeout(saveNow, 1000); return false; }
+  if (drag || deferred || saving || changingFile) { if (!host) saveTimer = setTimeout(saveNow, 1000); return false; }
+  const previousState = saveState, wasUnsaved = unsaved;
+  let resolveSave; saveCompletion = new Promise((resolve) => { resolveSave = resolve; });
   saving = true; setSaveState('saving');
   let ok = false;
   try {
@@ -192,19 +224,22 @@ async function saveNow({ as = false } = {}) {
       const bytes = await assembleFile();
       const r = await (as ? host.saveAs(bytes) : host.save(bytes));
       if (r) { source = { kind: 'file', path: r.path }; ok = true; }
-      setSaveState(ok ? 'saved' : 'dirty', Date.now());
+      setSaveState(ok ? (dirty.size ? 'dirty' : 'saved') : wasUnsaved || dirty.size ? 'dirty' : previousState, ok ? Date.now() : undefined);
     } else {
       await saveWorking({ meta: doc.meta ?? {}, chunks, unknown: doc.unknown ?? [], savedAt: Date.now() });
       ok = true;
       setSaveState(dirty.size ? 'dirty' : 'saved', Date.now());
     }
-  } catch (e) { console.error(e); $('save').textContent = t('save.failed', { e: e.message }); }
+  } catch (e) { console.error(e); setSaveState(wasUnsaved || dirty.size ? 'dirty' : previousState); $('save').textContent = t('save.failed', { e: e.message }); }
   saving = false;
+  resolveSave(); saveCompletion = null;
   if (!host && dirty.size) saveTimer = setTimeout(saveNow, 1000);
   return ok;
 }
 
 async function fileBytes() {
+  if (saving) await saveCompletion;
+  if (drag || deferred) throw new Error(getLang() === 'ru' ? 'Сначала завершите редактирование.' : 'Finish the current edit first.');
   await saveNow();
   return assembleFile();
 }
@@ -217,38 +252,59 @@ function assembleFile() {
 // ---------------------------------------------------------------- new / open / sample / save (browser)
 // is there work that switching to another world would lose?
 const hasWork = () => (host ? unsaved : hist.done.length > 0 || dirty.size > 0);
-async function replaceWorld(load, src) {
-  if (hasWork() && !confirm(t('file.replaceWorkConfirm'))) return false;
-  busy(t('common.loading'));
+// One document transition owns both renderer state and the native save destination.
+// Never show an Open dialog or change that destination while a save is in flight.
+async function changeFile(run, message = null) {
+  if (saving || changingFile) { hint(getLang() === 'ru' ? 'Дождитесь завершения операции с файлом.' : 'Wait for the file operation to finish.'); return false; }
+  changingFile = true;
   try {
-    const d = await load();
-    if (!host) await dropWorking().catch(() => {});     // the browser copy follows the new world from its first edit
-    setDoc(d, {}, src);
-    setSaveState('clean');
-    return true;
-  } catch (e) { alert(t('file.openFailed', { e: e.message })); return false; } finally { busy(''); }
+    if (message && hasWork() && !confirm(message)) return false;
+    return await run();
+  } finally { changingFile = false; }
+}
+async function replaceWorld(load, src) {
+  return changeFile(async () => {
+    busy(t('common.loading'));
+    try {
+      const d = await load();
+      if (!host) await dropWorking().catch(() => {});     // the browser copy follows the new world from its first edit
+      setDoc(d, {}, src);
+      setSaveState('clean');
+      return true;
+    } catch (e) { alert(t('file.openFailed', { e: e.message })); return false; } finally { busy(''); }
+  }, t('file.replaceWorkConfirm'));
 }
 // a small modal form: fields [{ name, label, type: 'select' | 'number' | 'bool', options: [[value, label]], value }]
 // fields may react to changes (onInput(vals, set)); `info(vals)` is a line of text kept up to date
 function modal(title, fields, okLabel, { info } = {}) {
   return new Promise((resolve) => {
     const vals = Object.fromEntries(fields.map((f) => [f.name, f.value])), inputs = {};
-    const close = (v) => { back.remove(); resolve(v); };
+    const previousFocus = document.activeElement;
+    const close = (v) => { if (v && Object.values(inputs).some((el) => !el.reportValidity())) return; back.remove(); previousFocus?.focus(); resolve(v); };
     const note = h('div', { class: 'muted', style: 'margin-top:8px' });
-    const changed = (f) => { f.onInput?.(vals, set); if (info) note.textContent = info(vals); };
+    const changed = (f) => { f.onInput?.(vals, set); if (info) { try { note.textContent = info(vals); } catch (error) { note.textContent = error.message; } } };
     const set = (name, v) => { vals[name] = v; const el = inputs[name]; if (el) { if (el.type === 'checkbox') el.checked = !!v; else el.value = v; } };
     const form = h('div', { class: 'fields' }, fields.map((f) => {
       const el = inputs[f.name] = f.type === 'select' ? h('select', { onchange: (e) => { vals[f.name] = e.target.value; changed(f); } }, f.options.map(([v, l]) => h('option', { value: v, selected: String(v) === String(f.value) }, l)))
         : f.type === 'bool' ? h('input', { type: 'checkbox', checked: !!f.value, onchange: (e) => { vals[f.name] = e.target.checked; changed(f); } })
           : h('input', { type: 'number', step: f.step ?? 'any', min: f.min, max: f.max, value: f.value, oninput: (e) => { vals[f.name] = +e.target.value; changed(f); } });
-      return h('div', { class: 'field' }, h('label', {}, f.label), el);
+      el.id = `dialog-${f.name}`; if (f.type !== 'bool') el.required = true;
+      return h('div', { class: 'field' }, h('label', { for: el.id }, f.label), el);
     }));
-    if (info) note.textContent = info(vals);
+    if (info) { try { note.textContent = info(vals); } catch (error) { note.textContent = error.message; } }
     const back = h('div', { class: 'modal-back', onclick: (e) => { if (e.target === back) close(null); } },
-      h('div', { class: 'modal' }, h('div', { class: 'hdr' }, title), form, note,
+      h('div', { class: 'modal', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'dialog-title' }, h('div', { class: 'hdr', id: 'dialog-title' }, title), form, note,
         h('div', { class: 'actions', style: 'justify-content:flex-end' },
           h('button', { onclick: () => close(null) }, t('dialog.cancel')), h('button', { class: 'primary', onclick: () => close(vals) }, okLabel))));
-    back.addEventListener('keydown', (e) => { if (e.key === 'Escape') close(null); if (e.key === 'Enter') close(vals); });
+    back.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') { e.preventDefault(); close(null); }
+      if (e.key === 'Enter' && e.target.tagName !== 'BUTTON') { e.preventDefault(); close(vals); }
+      if (e.key === 'Tab') {
+        const items = [...back.querySelectorAll('button,input,select,textarea')], first = items[0], last = items.at(-1);
+        if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+        else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+      }
+    });
     document.body.append(back);
     back.querySelector('select, input')?.focus();
   });
@@ -256,7 +312,7 @@ function modal(title, fields, okLabel, { info } = {}) {
 // presets in km: squares from a district to a region, and a few long strips (a coast, a valley, a highway)
 const PRESETS = [[0.5, 0.5], [1, 1], [2, 2], [3, 3], [4, 4], [6, 6], [8, 8], [10, 10], [12, 12], [16, 16], [2, 1], [4, 2], [8, 4], [12, 3], [16, 4]];
 async function newWorld() {
-  if (hasWork() && !confirm(t('file.replaceWorkConfirm'))) return;
+  return changeFile(async () => {
   const v = await modal(t('newMap.title'), [
     { name: 'preset', label: t('newMap.preset'), type: 'select', value: '4x4',
       options: [...PRESETS.map(([w, d]) => [`${w}x${d}`, t('newMap.kmWD', { w, d })]), ['custom', t('newMap.custom')]],
@@ -275,18 +331,20 @@ async function newWorld() {
   });
   if (!v) return;
   const width = Math.max(250, (+v.width || 4) * 1000), depth = Math.max(250, (+v.depth || 4) * 1000), size = Math.max(width, depth);
-  host?.newFile();
+  const next = emptyWorld({ width, depth, res: v.res, ground: +v.height || 0 });
+  await host?.newFile();
   if (!host) await dropWorking().catch(() => {});
-  setDoc(emptyWorld({ width, depth, res: v.res, ground: +v.height || 0 }), {}, { kind: 'new' });
+  setDoc(next, {}, { kind: 'new' });
   setSaveState('clean');
   if (v.relief) {
     await runGenerator(mcpSession, 'terrain', { island: true, base: +v.height || 10, amplitude: size / 100, wavelength: size / 4 }, t('gen.undo', { name: t('gen.terrain') }));
     hist.done.length = 0; updateUndo();            // the relief is part of the new map, not an edit to undo
     setSaveState('clean');
   }
+  }, t('file.replaceWorkConfirm'));
 }
 async function openSample() {
-  if (host) { const f = await host.openSample(); return f && replaceWorld(() => decodeWorld(f.bytes), { kind: 'file', path: f.path }); }
+  if (host) return openFromApp(() => host.openSample(), {}, t('file.replaceWorkConfirm'));
   return replaceWorld(async () => decodeWorld(await (await fetch(SAMPLE)).arrayBuffer()), { kind: 'sample' });
 }
 $('new').onclick = () => newWorld();
@@ -356,24 +414,31 @@ $('redo').onclick = () => hist.redo();
 
 // ---------------------------------------------------------------- desktop app: the file on disk
 async function bootApp() {
-  try {
+  await changeFile(async () => { try {
     const f = await host.current();
     // no file given (double-click, command line): start with a new empty map
-    if (f) setDoc(await decodeWorld(f.bytes), {}, { kind: 'file', path: f.path });
+    if (f) { const d = await decodeWorld(f.bytes); await f.commit?.(); setDoc(d, {}, { kind: 'file', path: f.path }); }
     else setDoc(emptyWorld(), {}, { kind: 'new' });
     setSaveState('clean');
   } catch (e) { console.error(e); busy(t('file.loadFailed', { e: e.message })); return; }
-  busy('');
+  busy(''); });
 }
-async function openFromApp(f, opts = {}) {
-  if (!f) return;
-  busy(t('common.reading'));
-  try { setDoc(await decodeWorld(f.bytes), {}, { kind: 'file', path: f.path }, opts); setSaveState('clean'); }
-  catch (e) { alert(t('file.openFailed', { e: e.message })); } finally { busy(''); }
+async function openFromApp(load, opts = {}, message = t('file.openOtherConfirm')) {
+  return changeFile(async () => {
+    busy(t('common.reading'));
+    try {
+      const f = await load();
+      if (!f) return false;
+      const d = await decodeWorld(f.bytes);
+      await f.commit?.();
+      setDoc(d, {}, { kind: 'file', path: f.path }, opts); setSaveState('clean');
+      return true;
+    } catch (e) { alert(t('file.openFailed', { e: e.message })); return false; } finally { busy(''); }
+  }, message);
 }
-const reloadFromDisk = async () => openFromApp(await host.reload(), { frame: false });
+const reloadFromDisk = async () => openFromApp(() => host.reload(), { frame: false }, t('file.reloadConfirm'));
 if (host) {
-  document.body.classList.add('frameless', host.platform === 'darwin' ? 'mac' : 'winlike');
+  if (host.frameless !== false) document.body.classList.add('frameless', host.platform === 'darwin' ? 'mac' : 'winlike');
   $('appmenu').onclick = (e) => { const r = e.currentTarget.getBoundingClientRect(); host.menu(r.left, r.bottom); };
   $('top').addEventListener('dblclick', (e) => { if (e.target === $('top') || e.target.id === 'source' || e.target.tagName === 'B') host.zoom(); });
   // the top bar becomes New / Open / Sample / Save / Save as / Reload; downloads and the dev-server write-back are browser things
@@ -383,8 +448,8 @@ if (host) {
   $('writeProject').hidden = false;
   $('writeProject').onclick = () => saveNow({ as: true });
   $('reset').hidden = false;
-  $('reset').onclick = () => { if (!sourcePath()) return; if (!unsaved || confirm(t('file.reloadConfirm'))) reloadFromDisk(); };
-  $('open').onclick = async () => { if (!unsaved || confirm(t('file.openOtherConfirm'))) openFromApp(await host.open()); };
+  $('reset').onclick = () => { if (sourcePath()) return reloadFromDisk(); };
+  $('open').onclick = () => openFromApp(() => host.open());
   host.on('menu', (what) => {
     if (what === 'new') newWorld();
     else if (what === 'open') $('open').onclick();
@@ -397,8 +462,7 @@ if (host) {
   // a .vspb opened from the system (double-click, Open With, drag onto the dock icon)
   host.on('file:open-request', async ({ path }) => {
     if (path === sourcePath() && !unsaved) return;
-    if (unsaved && !confirm(t('file.openOtherConfirm'))) return;
-    openFromApp(await host.openPath(path));
+    return openFromApp(() => host.openPath(path));
   });
   host.on('file:changed', () => {
     if (!unsaved) { reloadFromDisk(); hint(t('file.changedReloaded')); return; }
@@ -409,7 +473,7 @@ if (host) {
   host.on('update', renderUpdate);
   host.info().then((i) => renderUpdate(i.update)).catch(() => {});
 }
-// update states from the shell: a new code bundle (downloads itself, restart to apply) or a new build (installer)
+// Optional shell-provided manual installer status; the bundled host has no automatic updater.
 let lastUpdate = null;
 function renderUpdate(st) {
   lastUpdate = st;
@@ -418,15 +482,9 @@ function renderUpdate(st) {
   if (b.hidden) return;
   const pct = st.progress != null && st.progress < 1 ? ` ${Math.round(st.progress * 100)}%` : '';
   b.disabled = !!pct;
-  if (st.kind === 'asar') {
-    b.textContent = pct ? t('update.downloadingCode', { v: st.version, pct }) : t('update.restart', { v: st.version });
-    b.title = t('update.restartTip');
-    b.onclick = async () => { if (!unsaved || (await saveNow())) host.update('restart'); };
-  } else {
-    b.textContent = pct ? t('update.downloadingShell', { v: st.version, pct }) : t('update.download', { v: st.version });
-    b.title = t('update.downloadTip');
-    b.onclick = () => host.update('download');
-  }
+  b.textContent = pct ? t('update.downloadingShell', { v: st.version, pct }) : t('update.download', { v: st.version });
+  b.title = t('update.downloadTip');
+  b.onclick = () => host.update('download');
 }
 
 // ---------------------------------------------------------------- MCP session: agent edits go through the same undo history
@@ -436,15 +494,21 @@ const mcpSession = {
   natural: (x, y) => groundSampler(doc.layers.terrain)(x, y),
   graded: (x, y) => world.H?.(x, y) ?? 0,
   info: () => ({ file: sourcePath() ?? sourceLabel(), unsaved, app: true, selection: sel && { kind: sel.kind, title: KINDS[sel.kind].title(sel.rec) } }),
-  edit(kind, rec, fn, label) { const tx = beginEdit(kind, rec); fn(rec); refreshFor(kind, rec)(); tx.commit(label); },
-  insert(kind, rec, label) { hist.insert(kind, list(kind), rec, undefined, label, refreshFor(kind, rec)); },
+  edit(kind, rec, fn, label) {
+    const tx = beginEdit(kind, rec), original = clone(rec);
+    let refreshing = false;
+    try { fn(rec); finalizeRecordEdit(doc, kind, rec, original); refreshing = true; refreshFor(kind, rec)(); tx.commit(label); }
+    catch (error) { tx.cancel(refreshing); afterChange(); throw error; }
+  },
+  insert(kind, rec, label) { validateRecord(kind, rec, doc); KINDS[kind].normalize?.(rec); hist.insert(kind, list(kind), rec, undefined, label, refreshFor(kind, rec)); },
   remove(kind, rec, label) { hist.remove(kind, list(kind), rec, label, refreshFor(kind, rec)); },
   roadTx(tx, label) { commitRoadTx(tx, label); },
   terrain(box, fn, label) {
     const T = doc.layers.terrain, blocks = [];
+    const patch = terrainPatch(T, box, fn);
     for (let bj = Math.floor(box[1] / BLOCK); bj <= Math.floor(box[3] / BLOCK); bj++)
       for (let bi = Math.floor(box[0] / BLOCK); bi <= Math.floor(box[2] / BLOCK); bi++) blocks.push({ bi, bj, before: readBlock(T, bi, bj) });
-    fn(T.base);
+    patch.write(patch.after);
     carveRegion(T, world.roadWorld.net, box);
     for (const b of blocks) b.after = readBlock(T, b.bi, b.bj);
     world.terrainChanged(box); markDirty('terrain');
@@ -452,6 +516,7 @@ const mcpSession = {
       () => { writeBlocks(T, blocks, 'after'); world.terrainChanged(box); markDirty('terrain'); });
   },
   setDef(group, name, value) {
+    validateDefChange(doc, group, name, value);
     const map = groupObj(group), old = map[name] === undefined ? null : clone(map[name]);
     const apply = (v) => { if (v === null) delete map[name]; else map[name] = clone(v); refreshDefs(group, name); renderDefs(); };
     apply(value);
@@ -459,12 +524,16 @@ const mcpSession = {
   },
   async save() { if (!(await saveNow())) throw new Error('not saved (busy or the save dialog was cancelled)'); return { file: sourcePath() ?? sourceLabel() }; },
   batch,
-  newWorld(o, force) {
-    if (hasWork() && !force) throw new Error('there are unsaved changes: save them or pass force: true');
-    host?.newFile();
-    if (!host) dropWorking().catch(() => {});
-    setDoc(emptyWorld(o), {}, { kind: 'new' });
-    setSaveState('clean');
+  async newWorld(o, force) {
+    if (saving || changingFile) throw new Error('a file operation is in progress');
+    return changeFile(async () => {
+      if (hasWork() && !force) throw new Error('there are unsaved changes: save them or pass force: true');
+      const next = emptyWorld(o);
+      await host?.newFile();
+      if (!host) await dropWorking().catch(() => {});
+      setDoc(next, {}, { kind: 'new' });
+      setSaveState('clean');
+    });
   },
   select(kind, rec) { select(kind, rec); focusSel(); },
   undo() { const c = hist.done.at(-1); if (!c) throw new Error('nothing to undo'); hist.undo(); return { undone: c.label }; },
@@ -483,6 +552,7 @@ const mcpSession = {
 async function mcpCall(name, args) {
   if (name === '__ui') { document.body.classList.toggle('shot', !!args.shot); return { content: [{ type: 'text', text: 'ok' }] }; }
   if (!doc) return { isError: true, content: [{ type: 'text', text: 'no world is open' }] };
+  if ((drag || saving || changingFile) && !['world_info', 'get', 'find', 'list_types', 'map', 'terrain_sample'].includes(name)) return { isError: true, content: [{ type: 'text', text: 'finish or cancel the current gesture/file operation before editing' }] };
   return runTool(mcpSession, name, args);
 }
 
@@ -540,26 +610,34 @@ function deferredRun(fn) {
 async function batch(label, fn) {
   if (deferred) return fn();
   const cmds = [];
+  const dirtyBefore = new Set(dirty), stateBefore = saveState, selectionBefore = sel;
   hist.push = (c) => cmds.push(c);            // collect the batch's commands instead of recording each
   deferred = { views: new Map(), roads: new Set() };
-  try { await fn(); } finally {
+  let failed = false;
+  try { await fn(); } catch (error) { failed = true; cmds.slice().reverse().forEach((c) => c.undo()); throw error; } finally {
     delete hist.push;
     const d = deferred; deferred = null; flushDeferred(d); afterChange();
-    if (cmds.length) hist.push({ label, kind: 'batch', undo: () => deferredRun(() => cmds.slice().reverse().forEach((c) => c.undo())),
+    if (failed) {
+      dirty.clear(); for (const layer of dirtyBefore) dirty.add(layer);
+      clearTimeout(saveTimer); if (!host && dirty.size) saveTimer = setTimeout(saveNow, 2000);
+      setSaveState(stateBefore);
+    }
+    if (cmds.length && !failed) hist.push({ label, kind: 'batch', selection: { undo: selectionBefore, redo: sel }, undo: () => deferredRun(() => cmds.slice().reverse().forEach((c) => c.undo())),
       redo: () => deferredRun(() => cmds.forEach((c) => c.redo())) });
   }
 }
 
 // an undoable edit of a record (and of the records that must move with it)
 function beginEdit(kind, rec) {
-  return KINDS[kind].related ? hist.beginGroup(kind, roadGroup(kind, rec), refreshFor(kind, rec)) : hist.begin(kind, rec, refreshFor(kind, rec));
+  const tx = KINDS[kind].related ? hist.beginGroup(kind, roadGroup(kind, rec), refreshFor(kind, rec)) : hist.begin(kind, rec, refreshFor(kind, rec));
+  tx.original = clone(rec); return tx;
 }
 // a topology edit (RoadTx) as one undo step
 function commitRoadTx(tx, label) {
-  const res = tx.finish(), recs = [...res.recs];
+  const res = tx.finish(), recs = [...res.recs], selected = sel;
   const refresh = () => { refreshRoads(recs); markRoadsDirty(); afterChange(); };
   refresh();
-  hist.custom(label, 'roads', () => { res.undo(); refresh(); }, () => { res.redo(); refresh(); });
+  hist.push({ label, kind: 'roads', recordKind: selected?.kind, rec: selected?.rec, undo: () => { res.undo(); refresh(); }, redo: () => { res.redo(); refresh(); } });
 }
 function afterChange() {
   if (deferred) return;
@@ -567,6 +645,10 @@ function afterChange() {
   drawSelection(); renderProps();
 }
 function onHistory(cmd, mode) {
+  if (mode !== 'do') {
+    const target = cmd.selection?.[mode] ?? (cmd.rec ? { kind: cmd.recordKind ?? cmd.kind, rec: cmd.rec } : null);
+    if (target && KINDS[target.kind] && list(target.kind).includes(target.rec)) select(target.kind, target.rec, { tab: false });
+  }
   updateUndo();
   if (mode !== 'do') hint(t(mode === 'undo' ? 'hist.undone' : 'hist.redone', { what: cmd.label }));
 }
@@ -578,9 +660,10 @@ function updateUndo() {
 
 // live preview while dragging: tiled records leave their tile and are drawn alone until the drop
 const live = {
-  kind: null, rec: null, obj: null, pending: false,
-  start(kind, rec) {
+  kind: null, rec: null, obj: null, pending: false, matrixOnly: false,
+  start(kind, rec, { matrixOnly = false } = {}) {
     this.kind = kind; this.rec = rec;
+    this.matrixOnly = kind === 'building' && matrixOnly;
     const K = KINDS[kind];
     if (K.rebuild === 'blocks' || K.rebuild === 'surfaces') { world.hidden.add(rec); world.touch(K.rebuild, rec); }
     this.pending = true;
@@ -589,6 +672,10 @@ const live = {
     if (!this.pending || !this.rec) return;
     this.pending = false;
     const K = KINDS[this.kind];
+    if (this.matrixOnly) {
+      if (!this.obj) { this.obj = world.buildingPreview(this.rec); scene.add(this.obj); }
+      this.obj.matrix.fromArray(buildingMatrix(this.rec)); this.obj.updateMatrixWorld(true); drawSelection(); return;
+    }
     if (K.rebuild === 'blocks' || K.rebuild === 'surfaces') {
       this.drop();
       this.obj = K.rebuild === 'blocks' ? world.blockTile([this.rec]) : world.surfaceTile([this.rec]);
@@ -604,8 +691,21 @@ const live = {
     if (K.rebuild === 'blocks' || K.rebuild === 'surfaces') world.hidden.delete(this.rec);
     refreshView(this.kind, this.rec);
     this.rec = null; this.kind = null; this.pending = false;
+    this.matrixOnly = false;
   },
 };
+
+// Every input exit path uses the same rollback. A gesture is either committed
+// once on pointerup, or completely cancelled (including temporary render state).
+function cancelGesture() {
+  const d = drag; drag = null; down = null; moveEv = null; controls.enabled = true;
+  if (d?.type === 'brush') {
+    writeBlocks(d.T, [...d.blocks.values()], 'before');
+    if (d.box.every(Number.isFinite)) world.terrainChanged(d.box);
+  } else d?.tx?.cancel();
+  live.end(); hover = null; activePt = null;
+  if (doc) { drawSelection(); renderProps(); }
+}
 
 // ---------------------------------------------------------------- road graph overlay (pick + edit roads)
 function buildRoadGraph() {
@@ -682,7 +782,7 @@ function nearestRoad(sx, sy, px = 9, nodesOnly = false) {
   }
   return best;
 }
-const PICK = ['roads', 'blocks', 'surfaces', 'furniture', 'trees', 'rails', 'wind', 'trains', 'cables'];
+const PICK = ['roads', 'blocks', 'surfaces', 'furniture', 'trees', 'rails', 'wind', 'cables'];
 function pick(ev) {
   const r = rayAt(ev), g = groundHit(r), gd = g ? g.distanceTo(r.origin) : Infinity;
   if (vis.roadGraph) { const nd = nearestRoad(ev.clientX, ev.clientY, 7, true); if (nd) return { ...nd, point: new THREE.Vector3(...nd.rec.p) }; }
@@ -704,8 +804,18 @@ const SEL_MAT = new THREE.LineBasicMaterial({ color: 0x34d5ff, depthTest: false,
 const HANDLE_MAT = new THREE.PointsMaterial({ color: 0xffffff, size: 8, sizeAttenuation: false, depthTest: false, transparent: true });
 const HOVER_MAT = new THREE.PointsMaterial({ color: 0xffd23f, size: 13, sizeAttenuation: false, depthTest: false, transparent: true });
 const ringZ = (ring, i, p) => (ring.z ? ring.z(i) + 0.3 : ground(p[0], p[1]) + 0.4);
+const ringPoint = (ring, i) => {
+  const p = ring.pts[i], q = [p[0], p[1], ringZ(ring, i, p)];
+  return ring.local ? localToWorld(ring.local, q) : q;
+};
+function localPlaneHit(r, rec, z) {
+  const inv = new THREE.Matrix4().fromArray(buildingMatrix(rec)).invert();
+  const localRay = r.clone().applyMatrix4(inv), p = new THREE.Vector3();
+  return localRay.intersectPlane(new THREE.Plane(new THREE.Vector3(0, 0, 1), -z), p);
+}
 
 function select(kind, rec, { tab = true } = {}) {
+  if (drag) cancelGesture();
   if (sel?.rec !== rec) activePt = null;
   sel = kind && rec ? { kind, rec } : null;
   hover = null;
@@ -722,7 +832,9 @@ function drawSelection() {
       const z0 = p.z ?? 0, z1 = z0 + (p.h ?? 0);
       ring.forEach((a, i) => {
         const b = ring[(i + 1) % ring.length];
-        segs.push(a[0], a[1], z0, b[0], b[1], z0, a[0], a[1], z1, b[0], b[1], z1, a[0], a[1], z0, a[0], a[1], z1);
+        const a0 = localToWorld(rec, [a[0], a[1], z0]), b0 = localToWorld(rec, [b[0], b[1], z0]);
+        const a1 = localToWorld(rec, [a[0], a[1], z1]), b1 = localToWorld(rec, [b[0], b[1], z1]);
+        segs.push(...a0, ...b0, ...a1, ...b1, ...a0, ...a1);
       });
     }
   } else if (K.rings) {
@@ -750,10 +862,10 @@ function drawSelection() {
     }
     // a bent line has new point objects: the hovered control point is found again by its number
     if (hover?.k !== undefined) hover = handles.find((x) => x.k === hover.k && x.ring.pts === hover.ring.pts) ?? null;
-    const hp = new THREE.BufferGeometry().setFromPoints(handles.map((hd) => new THREE.Vector3(hd.p[0], hd.p[1], hd.z)));
+    const hp = new THREE.BufferGeometry().setFromPoints(handles.map((hd) => new THREE.Vector3(...ringPoint(hd.ring, hd.i))));
     const pts = new THREE.Points(hp, HANDLE_MAT); pts.renderOrder = 11; selGroup.add(pts);
     if (hover) {
-      const hv = new THREE.Points(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(hover.p[0], hover.p[1], hover.z)]), HOVER_MAT);
+      const hv = new THREE.Points(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(...ringPoint(hover.ring, hover.i))]), HOVER_MAT);
       hv.renderOrder = 12; selGroup.add(hv);
     }
   }
@@ -761,7 +873,7 @@ function drawSelection() {
 function nearestHandle(sx, sy, px = 9) {
   let best = null, bd = px;
   for (const hd of handles) {
-    const s = toScreen(hd.p[0], hd.p[1], hd.z);
+    const s = toScreen(...ringPoint(hd.ring, hd.i));
     if (s) { const d = Math.hypot(s[0] - sx, s[1] - sy); if (d < bd) { bd = d; best = hd; } }
   }
   return best;
@@ -773,7 +885,7 @@ function nearestSegment(sx, sy, px = 8) {
     const n = ring.pts.length, m = ring.closed ? n : n - 1;
     for (let i = 0; i < m; i++) {
       const a = ring.pts[i], b = ring.pts[(i + 1) % n];
-      const sa = toScreen(a[0], a[1], ringZ(ring, i, a)), sb = toScreen(b[0], b[1], ringZ(ring, (i + 1) % n, b));
+      const sa = toScreen(...ringPoint(ring, i)), sb = toScreen(...ringPoint(ring, (i + 1) % n));
       if (!sa || !sb) continue;
       const [d, t] = segDist(sx, sy, sa, sb);
       if (d < bd) { bd = d; best = { ring, i, t }; }
@@ -822,18 +934,8 @@ function stepOf(kind, pts) {
 }
 // re-draw a line from its state at the start of the gesture; flags per point follow along
 function applyReshape(c, op) {
-  const res = reshape(c.start, c.C, op, c.step);
-  c.pts.splice(0, c.pts.length, ...res.pts);
-  c.C2 = res.C;
+  const res = reshapeCurve(doc, sel.kind, sel.rec, c, op);
   ctrlCache.set(c.pts, { C: res.C, n: c.pts.length, tol: opts.ctrlTol });
-  if (c.ends && op.move !== undefined) {
-    // a road end: its node goes along, the other roads there bend over their first 40 m
-    const last = op.move !== 0, q = c.pts[last ? c.pts.length - 1 : 0], q0 = c.start[last ? c.start.length - 1 : 0];
-    const d = [q[0] - q0[0], q[1] - q0[1], (q[2] ?? 0) - (q0[2] ?? 0)];
-    c.ends.nd.p = c.ends.p0.map((v, i) => r2(v + d[i]));
-    for (const o of c.ends.others) { o.e.pts.forEach((p, i) => { p[0] = o.start[i][0]; p[1] = o.start[i][1]; p[2] = o.start[i][2]; }); followEnd(o.e, o.k, d); }
-  }
-  if (sel.kind === 'edge') edgeFlags(sel.rec);
 }
 // bridges and tunnels of a road follow its levels over the natural ground
 function edgeFlags(rec) {
@@ -885,11 +987,18 @@ function removeVertex(hd) {
 // ---------------------------------------------------------------- edits on the selection
 function editSel(fn, label) {
   if (!sel) return;
-  const { kind, rec } = sel, tx = beginEdit(kind, rec);
-  fn(rec);
-  if (kind === 'furniture') delete rec.owner;     // touched by hand: the road no longer re-places it
-  refreshFor(kind, rec)();
-  tx.commit(label);
+  const { kind, rec } = sel, tx = beginEdit(kind, rec), original = clone(rec);
+  // Primitive field edits do not change the form's structure. Retaining its DOM
+  // lets native Tab/Shift+Tab and click focus continue to the intended control.
+  const previousPreserve = preservePropertyInputs, active = changingPropertyControl ?? document.activeElement;
+  if (active?.matches('input,select') && active.closest('#pane-props')) preservePropertyInputs = true;
+  let refreshing = false;
+  try {
+    fn(rec); finalizeRecordEdit(doc, kind, rec, original);
+    if (kind === 'furniture') delete rec.owner;
+    refreshing = true; refreshFor(kind, rec)(); tx.commit(label);
+  } catch (error) { preservePropertyInputs = previousPreserve; tx.cancel(refreshing); afterChange(); hint(error.message); if (refreshing) console.error(error); }
+  finally { preservePropertyInputs = previousPreserve; }
 }
 function deleteSel() {
   if (!sel) return;
@@ -933,9 +1042,9 @@ function duplicateSel() {
 function rotateSel(deg) {
   if (!sel || !KINDS[sel.kind].rotate) return;
   const K = KINDS[sel.kind], [cx, cy] = K.center(sel.rec);
-  editSel((r) => K.rotate(r, (deg * Math.PI) / 180, cx, cy), t('hist.rotate', { deg }));
+  editSel((r) => transformRecord(doc, sel.kind, r, { rotate_deg: deg }), t('hist.rotate', { deg }));
 }
-function nudgeSel(dx, dy, dz = 0) { if (sel) editSel((r) => KINDS[sel.kind].move(r, dx, dy, dz, doc.layers), t('hist.nudge')); }
+function nudgeSel(dx, dy, dz = 0) { if (sel) editSel((r) => transformRecord(doc, sel.kind, r, { dx, dy, dz }), t('hist.nudge')); }
 const HAS_Z = new Set(['building', 'furniture', 'tree', 'wind']);
 function groundSel() {
   if (!sel || !HAS_Z.has(sel.kind)) return;
@@ -951,18 +1060,21 @@ function focusSel() {
 
 // ---------------------------------------------------------------- creation
 function insertNew(kind, rec, label) {
+  validateRecord(kind, rec, doc); KINDS[kind].normalize?.(rec);
   hist.insert(kind, list(kind), rec, undefined, label, refreshFor(kind, rec));
   select(kind, rec);
 }
 function finishDraw() {
   if (!draw) return;
+  const original = draw;
+  try {
   const pts = draw.pts.filter((p, i, a) => i === 0 || Math.hypot(p[0] - a[i - 1][0], p[1] - a[i - 1][1]) > 0.5);
   const kind = draw.kind;
   draw = null; drawDraft();
   if (kind === 'road') {
-    if (pts.length < 2) return;
-    const res = addRoad(doc, groundSampler(doc.layers.terrain), pts, opts.rCls, opts.rName.trim());
-    if (!res) { hint(t('road.layFailed')); return; }
+    if (pts.length < 2) throw new Error(getLang() === 'ru' ? 'Добавьте минимум две точки.' : 'Add at least two points.');
+    const res = addRoad(doc, groundSampler(doc.layers.terrain), pts, opts.rCls, opts.rName.trim(), { elevation: opts.rElevation, snap: opts.roadSnap });
+    if (!res) throw new Error(t('road.layFailed'));
     commitRoadTx(res.tx, t('hist.newRoad'));
     return select('edge', res.edge);
   }
@@ -977,16 +1089,51 @@ function finishDraw() {
     const P = resample(filletPath(pts, pts.map((_, i) => (i === 0 || i === pts.length - 1 ? 0 : Math.max(+opts.railR || 0, 0)))), SPACING);
     return insertNew('rail', P.map((p) => [r2(p[0]), r2(p[1]), r2(ground(p[0], p[1]))]), t('hist.newRail'));
   }
-  if (pts.length < 3) return;
+  if (pts.length < 3) throw new Error(getLang() === 'ru' ? 'Добавьте минимум три точки контура.' : 'Add at least three outline points.');
   const p2 = pts.map((p) => [r2(p[0]), r2(p[1])]);
+  if (polygonIssue(p2)) throw new Error(getLang() === 'ru' ? 'Контур пересекает себя или имеет нулевую площадь. Исправьте точки.' : 'The outline intersects itself or has no area. Adjust its points.');
   if (kind === 'building') {
     insertNew('building', { type: opts.bType, zone: opts.bZone,
       parts: [{ p: p2, z: r2(Math.min(...pts.map((p) => p[2]))), h: +opts.bH || 10, m: opts.bMat }] }, t('hist.newBuilding'));
   } else insertNew('surface', { p: p2, m: opts.sMat }, t('hist.newSurface'));
+  } catch (error) { draw = original; drawDraft(); hint(error.message); }
+}
+function creationPoint(g, ev = {}) {
+  let x = g.x, y = g.y;
+  const step = Math.max(0.1, opts.gridStep || 1);
+  if (opts.gridSnap) { x = Math.round(x / step) * step; y = Math.round(y / step) * step; }
+  if (ev.shiftKey && draw?.pts.length) {
+    const a = draw.pts.at(-1), d = Math.hypot(x - a[0], y - a[1]), angle = Math.round(Math.atan2(y - a[1], x - a[0]) / (Math.PI / 4)) * Math.PI / 4;
+    x = a[0] + Math.cos(angle) * d; y = a[1] + Math.sin(angle) * d;
+  }
+  const point = [x, y, ground(x, y)];
+  if (tool === 'road' && opts.roadSnap) {
+    const match = snapEnd(doc.layers.roads, [x, y, point[2] + opts.rElevation], doc.layers.roads.classes[opts.rCls]);
+    const p = match?.node?.p ?? match?.edge?.pts[match.i];
+    if (p) return [p[0], p[1], p[2] - opts.rElevation];
+  }
+  return point;
+}
+function renderDrawActions() {
+  $('draw-actions')?.remove();
+  if (!draw) return;
+  const ru = getLang() === 'ru';
+  $('toolopts').append(h('div', { id: 'draw-actions' },
+    h('div', { class: 'muted' }, `${draw.pts.length} ${ru ? 'точек' : 'points'}${draft.userData.length ? ` · ${draft.userData.length.toFixed(0)} m` : ''}`),
+    h('div', { class: 'tool-finish' },
+      h('button', { class: 'primary', onclick: finishDraw }, ru ? 'Готово ↵' : 'Finish ↵'),
+      h('button', { onclick: () => { draw = null; drawDraft(); } }, ru ? 'Отмена Esc' : 'Cancel Esc')),
+    h('div', { class: 'muted' }, ru ? 'Shift — направление с шагом 45°' : 'Shift — constrain to 45°'),
+  ));
 }
 function drawDraft() {
   draft.traverse((o) => o.geometry?.dispose()); draft.clear();
+  draft.userData.length = 0;
   if (draw?.pts.length) {
+    if (draw.kind === 'road') {
+      const group = roadPreview([...draw.pts, ...(draw.cursor ? [draw.cursor] : [])], doc.layers.roads.classes[opts.rCls], groundSampler(doc.layers.terrain), opts.rElevation);
+      draft.add(group); draft.userData.length = group.userData.length;
+    }
     const pts = [...draw.pts, ...(draw.cursor ? [draw.cursor] : [])].map((p) => new THREE.Vector3(p[0], p[1], p[2] + 0.6));
     if (draw.kind !== 'rail' && draw.kind !== 'road' && draw.kind !== 'power' && pts.length > 2) pts.push(pts[0]);
     const l = new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), SEL_MAT); l.renderOrder = 10; draft.add(l);
@@ -1000,6 +1147,7 @@ function drawDraft() {
     }
     const l = new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), SEL_MAT); l.renderOrder = 10; draft.add(l);
   }
+  renderDrawActions();
 }
 
 // ---------------------------------------------------------------- terrain brush
@@ -1106,14 +1254,14 @@ el.addEventListener('pointerdown', (ev) => {
       drawSelection();
       const nh = handles.find((x) => x.p === p);
       controls.enabled = false;
-      drag = { type: 'vertex', tx, z: nh.z, links: [[ring.pts, i + 1]], label: t('hist.addVertex') };
+      drag = { type: 'vertex', tx, z: nh.z, local: ring.local, links: [[ring.pts, i + 1]], label: t('hist.addVertex') };
       live.start(sel.kind, sel.rec);
       down = null; return;
     }
   }
   if (hd) {
     controls.enabled = false;
-    drag = { type: 'vertex', tx: beginEdit(sel.kind, sel.rec), z: hd.z, links: linkedVertices(hd), label: t('hist.vertex') };
+    drag = { type: 'vertex', tx: beginEdit(sel.kind, sel.rec), z: hd.z, local: hd.ring.local, links: linkedVertices(hd), label: t('hist.vertex') };
     const n = hd.ring.pts.length;
     if (CURVES.has(sel.kind)) {
       activePt = { pts: hd.ring.pts, k: hd.k, i: hd.i };
@@ -1136,7 +1284,7 @@ el.addEventListener('pointerdown', (ev) => {
     const [cx, cy] = K.center(sel.rec);
     drag = { type: 'move', tx: beginEdit(sel.kind, sel.rec), z: pk.point.z, last: pk.point.clone(), c0: [cx, cy] };
     if (sel.kind === 'furniture') delete sel.rec.owner;
-    live.start(sel.kind, sel.rec);
+    live.start(sel.kind, sel.rec, { matrixOnly: true });
   }
 }, { capture: true });
 
@@ -1147,7 +1295,7 @@ function onMove(ev) {
   if (!doc) return;
   const r = rayAt(ev);
   if (drag?.type === 'vertex') {
-    const p = planeHit(r, drag.z); if (!p) return;
+    const p = drag.local ? localPlaneHit(r, drag.local, drag.z) : planeHit(r, drag.z); if (!p) return;
     const v = drag.vertical, dz = v ? (v.y0 - ev.clientY) * v.mpp : 0;
     if (drag.ctrl) {
       const c = drag.ctrl, q = c.start[c.C[c.k]];
@@ -1180,7 +1328,11 @@ function onMove(ev) {
   }
   if (drag?.type === 'move') {
     const p = planeHit(r, drag.z); if (!p) return;
-    const dx = p.x - drag.last.x, dy = p.y - drag.last.y;
+    let dx = p.x - drag.last.x, dy = p.y - drag.last.y;
+    if (opts.gridSnap) {
+      const step = Math.max(0.1, opts.gridStep || 1), c = KINDS[sel.kind].center(sel.rec);
+      dx = Math.round((c[0] + dx) / step) * step - c[0]; dy = Math.round((c[1] + dy) / step) * step - c[1];
+    }
     if (Math.abs(dx) + Math.abs(dy) < 0.01) return;
     KINDS[sel.kind].move(sel.rec, dx, dy, 0, doc.layers);
     drag.last = p; live.pending = true;
@@ -1189,7 +1341,7 @@ function onMove(ev) {
   const g = groundHit(r);
   $('coords').textContent = g ? `${g.x.toFixed(1)}, ${g.y.toFixed(1)}, ${g.z.toFixed(1)}` : '';
   if (tool === 'terrain') { brushAt = g; drawDraft(); return; }
-  if (draw && g) { draw.cursor = [g.x, g.y, g.z]; drawDraft(); return; }
+  if (draw && g) { draw.cursor = creationPoint(g, ev); drawDraft(); return; }
   if (tool === 'select' && handles.length) {
     const hd = nearestHandle(ev.clientX, ev.clientY);
     if (hd !== hover) { hover = hd; drawSelection(); }
@@ -1206,7 +1358,10 @@ addEventListener('pointerup', (ev) => {
       const [x, y] = K.center(sel.rec);
       K.move(sel.rec, 0, 0, ground(x, y) - ground(drag.c0[0], drag.c0[1]), doc.layers);
     }
-    const d = drag; drag = null;
+    const d = drag;
+    try { finalizeRecordEdit(doc, sel.kind, sel.rec, d.tx.original); }
+    catch (error) { cancelGesture(); hint(error.message); return; }
+    drag = null;
     live.end();
     if (d.tx.commit(d.type === 'move' ? t('hist.move', { what: K.label }) : d.label)) { if (K.rebuild === 'roads') markRoadsDirty(); else markDirty(K.layer); }
     controls.enabled = true;
@@ -1219,6 +1374,8 @@ addEventListener('pointerup', (ev) => {
   if (moved) return;
   click(ev);
 });
+el.addEventListener('pointercancel', cancelGesture);
+addEventListener('blur', () => { if (drag) cancelGesture(); });
 
 function click(ev) {
   const g = groundHit(rayAt(ev));
@@ -1226,7 +1383,7 @@ function click(ev) {
   if (!g) return;
   if (tool === 'building' || tool === 'surface' || tool === 'rail' || tool === 'road' || tool === 'power') {
     draw ??= { kind: tool, pts: [] };
-    draw.pts.push([g.x, g.y, g.z]);
+    draw.pts.push(creationPoint(g, ev));
     drawDraft();
     return;
   }
@@ -1237,7 +1394,9 @@ function click(ev) {
 
 // ---------------------------------------------------------------- keyboard
 addEventListener('keydown', (ev) => {
-  if (ev.target.closest?.('input, textarea, select')) return;
+  if (drag && ev.code === 'Escape') { ev.preventDefault(); cancelGesture(); return; }
+  if (drag && ((ev.ctrlKey || ev.metaKey) && ['KeyZ', 'KeyY'].includes(ev.code) || ['Delete', 'Backspace'].includes(ev.code))) cancelGesture();
+  if (ev.target.closest?.('input, textarea, select, .modal-back')) return;
   const mod = ev.ctrlKey || ev.metaKey;
   if (mod && ev.code === 'KeyZ') { ev.preventDefault(); if (ev.shiftKey) hist.redo(); else hist.undo(); return; }
   if (mod && ev.code === 'KeyY') { ev.preventDefault(); hist.redo(); return; }
@@ -1268,7 +1427,7 @@ addEventListener('keydown', (ev) => {
   if (ev.code === 'ArrowUp') nudgeSel(0, step); if (ev.code === 'ArrowDown') nudgeSel(0, -step);
   if (ev.code === 'PageUp' && !raiseActive(step)) nudgeSel(0, 0, step);
   if (ev.code === 'PageDown' && !raiseActive(-step)) nudgeSel(0, 0, -step);
-  if (ev.code === 'KeyN') { const on = !world.night; world.setNight(on); hemi.intensity = on ? 0.18 : 1.1; sun.intensity = on ? 0.08 : 1.6; }
+  if (ev.code === 'KeyN') toggleNight();
 });
 
 // ---------------------------------------------------------------- tools panel
@@ -1283,20 +1442,29 @@ const HINTS = {
   tree: 'hint.tree', wind: 'hint.wind',
   terrain: 'hint.terrain',
 };
-function hint(text) { $('hint').innerHTML = text ?? t(HINTS[tool]); }
+function hint(text) {
+  // Only built-in help contains trusted markup. File/resource names and errors
+  // are text, so imported data cannot inject HTML into the workspace.
+  if (text === undefined) $('hint').innerHTML = t(HINTS[tool]);
+  else $('hint').textContent = text;
+}
 function optSelect(label, key, items) {
   return h('label', {}, label, h('select', { onchange: (e) => { opts[key] = e.target.value; saveOpts(); } },
     items.map((v) => h('option', { value: v, selected: opts[key] === v }, v))));
 }
 function optNum(label, key, attrs = {}) {
-  return h('label', {}, label, h('input', { type: 'number', step: 'any', value: opts[key], ...attrs, onchange: (e) => { opts[key] = +e.target.value; saveOpts(); drawDraft(); } }));
+  return h('label', {}, label, h('input', { type: 'number', step: 'any', value: opts[key], ...attrs, onchange: (e) => { if (!e.target.value || !e.target.validity.valid || !Number.isFinite(+e.target.value)) { e.target.value = opts[key]; return; } opts[key] = +e.target.value; saveOpts(); drawDraft(); } }));
 }
 function setTool(name) {
+  if (drag) cancelGesture();
   if (draw && name !== tool) { draw = null; drawDraft(); }
   tool = name;
   for (const b of document.querySelectorAll('[data-tool]')) b.classList.toggle('on', b.dataset.tool === name);
   const box = $('toolopts'); box.innerHTML = '';
+  const ru = getLang() === 'ru';
   const d = doc?.layers.defs ?? {}, keys = (o) => Object.keys(o ?? {}).sort();
+  if (doc) for (const [key, registry] of Object.entries({ rCls: doc.layers.roads.classes, bType: d.buildingTypes, bZone: d.zones, bMat: d.materials, sMat: d.surfaces, fType: d.furniture }))
+    if (!Object.hasOwn(registry ?? {}, opts[key])) opts[key] = Object.keys(registry ?? {})[0] ?? '';
   if (name === 'select') box.append(h('label', {}, t('opt.onGround'), h('input', { type: 'checkbox', checked: opts.snap, onchange: (e) => { opts.snap = e.target.checked; saveOpts(); } })),
     h('label', { title: t('opt.ctrlPtsTip') }, t('opt.ctrlPts'), h('input', { type: 'checkbox', checked: opts.ctrl, onchange: (e) => { opts.ctrl = e.target.checked; saveOpts(); drawSelection(); } })),
     h('label', { title: t('opt.ctrlTolTip') }, t('opt.ctrlTol'), h('input', { type: 'number', step: 'any', min: 0.1, value: opts.ctrlTol, onchange: (e) => { opts.ctrlTol = Math.max(+e.target.value || 1.5, 0.1); saveOpts(); drawSelection(); } })),
@@ -1308,9 +1476,14 @@ function setTool(name) {
   if (name === 'building') box.append(optSelect(t('opt.type'), 'bType', keys(d.buildingTypes)), optSelect(t('opt.zone'), 'bZone', keys(d.zones)), optSelect(t('opt.material'), 'bMat', keys(d.materials)), optNum(t('opt.height'), 'bH', { min: 1 }));
   if (name === 'surface') box.append(optSelect(t('opt.cover'), 'sMat', keys(d.surfaces)));
   if (name === 'road') box.append(optSelect(t('opt.class'), 'rCls', keys(doc?.layers.roads?.classes)),
-    h('label', {}, t('opt.name'), h('input', { type: 'text', value: opts.rName, onchange: (e) => { opts.rName = e.target.value; saveOpts(); } })));
+    h('label', {}, t('opt.name'), h('input', { type: 'text', value: opts.rName, onchange: (e) => { opts.rName = e.target.value; saveOpts(); } })),
+    optNum(ru ? 'Над рельефом, м' : 'Height offset, m', 'rElevation', { min: -500, max: 500, step: 0.5 }),
+    h('label', {}, ru ? 'Связывать дороги' : 'Connect roads', h('input', { type: 'checkbox', checked: opts.roadSnap, onchange: (e) => { opts.roadSnap = e.target.checked; saveOpts(); drawDraft(); } })));
   if (name === 'furniture') box.append(optSelect(t('opt.type'), 'fType', keys(d.furniture)), optNum(t('opt.heading'), 'fRot'));
   if (name === 'terrain') box.append(optSelect(t('opt.mode'), 'brush', ['raise', 'lower', 'smooth', 'flatten']), optNum(t('opt.radius'), 'radius', { min: 6 }), optNum(t('opt.strength'), 'strength', { min: 0.1 }));
+  if (name !== 'terrain') box.append(
+    h('label', {}, ru ? 'Привязка к сетке' : 'Snap to grid', h('input', { type: 'checkbox', checked: opts.gridSnap, onchange: (e) => { opts.gridSnap = e.target.checked; saveOpts(); } })),
+    optNum(ru ? 'Шаг сетки, м' : 'Grid step, m', 'gridStep', { min: 0.1, max: 100, step: 0.5 }));
   if (name !== 'terrain') brushAt = null;
   drawSelection(); drawDraft(); hint();
 }
@@ -1320,17 +1493,19 @@ for (const b of document.querySelectorAll('[data-tool]')) b.onclick = () => setT
 function showTab(name) {
   for (const b of document.querySelectorAll('[data-tab]')) b.classList.toggle('on', b.dataset.tab === name);
   for (const p of document.querySelectorAll('.pane')) p.classList.toggle('on', p.id === 'pane-' + name);
+  if (name === 'materials') renderMaterials();
 }
 for (const b of document.querySelectorAll('[data-tab]')) b.onclick = () => showTab(b.dataset.tab);
 
 function renderProps() {
+  if (preservePropertyInputs) return;
   const el = $('pane-props'); el.innerHTML = '';
   if (!doc) return;
   if (!sel) {
     const L = doc.layers, n = (k) => (KINDS[k].list(L) ?? []).length;
     el.append(h('div', { class: 'hdr' }, t('props.none')),
       h('p', { class: 'muted' }, t('props.noneHelp')),
-      h('div', { class: 'fields' }, Object.keys(KINDS).map((k) => h('div', { class: 'field' }, h('label', {}, KINDS[k].label), h('span', {}, String(n(k)))))));
+      h('div', { class: 'fields' }, Object.keys(KINDS).filter((k) => k !== 'train').map((k) => h('div', { class: 'field' }, h('label', {}, KINDS[k].label), h('span', {}, String(n(k)))))));
     return;
   }
   const { kind, rec } = sel, K = KINDS[kind];
@@ -1342,11 +1517,12 @@ function renderProps() {
     K.rotate ? h('button', { onclick: () => rotateSel(-15), title: 'E' }, '⟳ 15°') : null,
     kind !== 'edge' && kind !== 'node' ? h('button', { onclick: duplicateSel, title: 'Ctrl+D' }, t('common.copy')) : null,
     h('button', { class: 'danger', onclick: deleteSel, title: 'Del' }, t('common.delete'))));
+  if (kind === 'building' || kind === 'furniture') renderTransform(el, kind, rec);
   const ai = activeIndex();
   if (ai >= 0) {
     // the grabbed point of a line: where it is and how high, editable
     const q = activePt.pts[ai], gz = ground(q[0], q[1]);
-    const num = (i) => h('input', { type: 'number', step: 'any', value: q[i], onchange: (e) => { const to = [...q]; to[i] = +e.target.value; setActivePoint(to); } });
+    const num = (i) => h('input', { type: 'number', step: 'any', value: q[i], 'aria-label': `${t('props.vertex', { i: ai })} ${'XYZ'[i]}`, onchange: (e) => { const index = activeIndex(); if (index < 0) return; const to = [...activePt.pts[index]]; to[i] = +e.target.value; setActivePoint(to); } });
     el.append(h('div', { class: 'hdr' }, activePt.k !== undefined ? t('props.ctrlPoint', { k: activePt.k + 1, n: controlsOf(activePt.pts).length }) : t('props.vertex', { i: ai })),
       h('div', { class: 'fields' },
         h('div', { class: 'field' }, h('label', {}, 'X'), num(0)), h('div', { class: 'field' }, h('label', {}, 'Y'), num(1)),
@@ -1360,16 +1536,80 @@ function renderProps() {
     el.querySelector('.actions').append(
       h('button', { onclick: () => addBlock('top'), title: t('props.blockTopTip') }, t('props.blockTop')),
       h('button', { onclick: () => addBlock('side'), title: t('props.blockSideTip') }, t('props.blockSide')));
+    const ru = getLang() === 'ru';
+    el.append(h('div', { class: 'field' }, h('label', {}, ru ? 'Детали фасада' : 'Facade detail'),
+      h('select', { 'aria-label': ru ? 'Детали фасада' : 'Facade detail', onchange: (e) => editSel((b) => { b.detail = e.target.value; }, ru ? 'Детализация' : 'Detail') },
+        [['auto', ru ? 'По качеству графики' : 'Graphics preset'], ['none', ru ? 'Только оболочка' : 'Shell only']].map(([value, text]) => h('option', { value, selected: (rec.detail ?? 'auto') === value }, text)))));
+    rec.parts.forEach((part, i) => {
+      const appearance = h('details', { class: 'part-appearance' }, h('summary', {}, `${ru ? 'Материалы блока' : 'Part materials'} ${i + 1}`));
+      for (const [slot, label] of [['m', ru ? 'Стены' : 'Walls'], ['roofMaterial', ru ? 'Крыша' : 'Roof'], ['trimMaterial', ru ? 'Отделка' : 'Trim']]) {
+        const value = part[slot] ?? part.m;
+        appearance.append(h('label', { class: 'field' }, h('span', {}, label), h('select', { 'aria-label': `${label} ${i + 1}`, onchange: (e) => editSel((b) => assignMaterial(doc, b, e.target.value, { part: i, slot }), label) },
+          Object.keys(doc.layers.defs.materials).sort().map((id) => h('option', { value: id, selected: value === id }, id)))));
+      }
+      el.append(appearance);
+    });
   }
   if (kind === 'edge') {
     el.querySelector('.actions').prepend(h('button', { onclick: profileSel, title: t('props.profileTip') }, t('props.profile')));
     el.append(h('div', { class: 'muted', style: 'margin-bottom:6px' }, t('props.roadDerived')));
+    const ru = getLang() === 'ru', m = roadMetrics(rec), limit = doc.layers.roads.classes[rec.cls]?.max_grade ?? 0.1;
+    el.append(h('div', { class: 'road-summary' },
+      h('span', {}, `${ru ? 'Длина' : 'Length'}: ${m.length.toFixed(0)} m`),
+      h('span', { class: m.maxGrade > limit + 0.005 ? 'bad' : '' }, `${ru ? 'Уклон' : 'Grade'}: ${(m.maxGrade * 100).toFixed(1)}% / ${(limit * 100).toFixed(0)}%`),
+      h('span', {}, `${ru ? 'Контрольных точек' : 'Controls'}: ${m.controls}`), h('span', {}, `${ru ? 'Мост / тоннель' : 'Bridge / tunnel'}: ${m.bridges} / ${m.tunnels}`)));
+    el.append(h('div', { class: 'actions' }, h('button', { disabled: rec.pts.length < 3, onclick: () => {
+      const i = activeIndex() > 0 && activeIndex() < rec.pts.length - 1 ? activeIndex() : Math.floor(rec.pts.length / 2), tx = new RoadTx(doc.layers.roads);
+      const node = splitEdge(doc.layers.roads, tx, rec, i); commitRoadTx(tx, ru ? 'Разделить дорогу' : 'Split road'); select('node', node);
+    } }, ru ? 'Разделить в точке / середине' : 'Split at point / midpoint')));
   }
   const box = h('div'); el.append(box);
   inspector(box, rec, {
     kind, edit: (fn, label) => editSel(fn, label),
+    omit: kind === 'building' ? ['transform'] : kind === 'furniture' ? ['p', 'h', 'tilt', 'scale'] : [],
     subKind: (key) => (key === 'parts' ? 'part' : key),
     sugg: (sub, field) => suggestions(doc, sub, field),
+  });
+}
+
+function renderTransform(el, kind, rec) {
+  const tr = transformOf(kind, rec), labels = getLang() === 'ru'
+    ? ['Трансформация объекта', 'Положение, м', 'Вращение, °', 'Масштаб', 'Материалы здания']
+    : ['Object transform', 'Position, m', 'Rotation, °', 'Scale', 'Building materials'];
+  const box = h('fieldset', { class: 'transform-fields' }, h('legend', {}, labels[0]));
+  for (const [key, label] of [['p', labels[1]], ['r', labels[2]], ['s', labels[3]]]) {
+    const values = tr[key], inputs = values.map((value, i) => h('input', {
+      type: 'number', step: key === 's' ? '0.05' : key === 'r' ? '1' : '0.1', 'aria-label': `${label} ${'XYZ'[i]}`,
+      ...(key === 's' ? { min: '0.001', max: '1000' } : {}),
+      value: (key === 'r' ? value * 180 / Math.PI : value).toFixed(key === 's' ? 3 : 2),
+      onchange: (e) => {
+        const v = Number(e.target.value);
+        if (!e.target.value || !Number.isFinite(v)) { renderProps(); return; }
+        editSel((r) => {
+          const next = structuredClone(transformOf(kind, r)); next[key][i] = key === 'r' ? v * Math.PI / 180 : v;
+          validateTransform(next);
+          if (kind === 'building') r.transform = next;
+          else { r.p = next.p; r.h = next.r[2]; r.tilt = next.r.slice(0, 2); r.scale = next.s; }
+        }, labels[0]);
+      },
+    }));
+    box.append(h('label', { class: 'transform-row' }, h('span', {}, label), h('span', { class: 'row vec' }, inputs)));
+  }
+  box.append(h('button', { onclick: () => editSel((r) => { const tr = transformOf(kind, r); if (kind === 'building') { tr.r = [0, 0, 0]; tr.s = [1, 1, 1]; } else { r.h = 0; r.tilt = [0, 0]; r.scale = [1, 1, 1]; } }, labels[0]) }, getLang() === 'ru' ? 'Сбросить вращение и масштаб' : 'Reset rotation and scale'));
+  if (kind === 'building') box.append(h('button', { onclick: () => showTab('materials') }, labels[4]));
+  el.append(box);
+}
+
+function renderMaterials() {
+  if (!doc || !$('pane-materials')) return;
+  materialPanel = renderMaterialEditor($('pane-materials'), {
+    getDoc: () => doc, getSelection: () => sel,
+    setDef: (g, name, value) => mcpSession.setDef(g, name, value),
+    assign: (id) => {
+      if (!['building', 'furniture'].includes(sel?.kind) || !doc.layers.defs.materials[id]) return;
+      editSel((b) => assignMaterial(doc, b, id), getLang() === 'ru' ? 'Назначить материал' : 'Assign material');
+    },
+    selectDef: (g, name) => { defGroup = g; defName = name; renderDefs(); showTab('defs'); },
   });
 }
 
@@ -1378,7 +1618,11 @@ const DEF_GROUPS = [['materials', 'defs.group.materials'], ['buildingTypes', 'de
   ['facades', 'defs.group.facades'], ['furniture', 'defs.group.furniture'], ['roadMaterials', 'defs.group.roadMaterials'], ['roadClasses', 'defs.group.roadClasses'], ['roads.classes', 'defs.group.roads.classes']];
 // which record fields point at entries of a group (for rename)
 const REFS = {
-  materials: () => (doc.layers.buildings?.items ?? []).flatMap((b) => b.parts ?? []).map((p) => [p, 'm', 'building', null]),
+  materials: () => [
+    ...(doc.layers.buildings?.items ?? []).flatMap((b) => (b.parts ?? []).flatMap((p) => ['m', 'roofMaterial', 'trimMaterial'].map((key) => [p, key, 'building', b]))),
+    ...Object.values(doc.layers.defs.furniture ?? {}).flatMap((f) => (f.parts ?? []).map((p) => [p, 'm', 'def', null])),
+    ...(doc.layers.furniture?.items ?? []).map((f) => [f, 'material', 'furniture', f]),
+  ],
   surfaces: () => (doc.layers.buildings?.surfaces ?? []).map((s) => [s, 'm', 'surface', s]),
   buildingTypes: () => (doc.layers.buildings?.items ?? []).map((b) => [b, 'type', 'building', b]),
   zones: () => (doc.layers.buildings?.items ?? []).map((b) => [b, 'zone', 'building', b]),
@@ -1407,11 +1651,13 @@ function refreshDefs(g, name) {
   if (g === 'furniture') world.buildFurniture();
   if (g === 'roadClasses' || g === 'roads.classes') buildRoadGraph();
   markDirty(groupLayer(g));
+  if (materialPanel && $('pane-materials').classList.contains('on')) materialPanel.refresh();
   setTool(tool);                         // tool option lists follow the registry
 }
 function renameDef(g, from, to) {
   const map = groupObj(g);
   if (!to || to === from || map[to]) return;
+  try { safeKey(to); } catch (error) { hint(error.message); return; }
   const refs = (REFS[g]?.() ?? []).filter(([o, f]) => o[f] === from);
   const swap = (a, b) => {
     const entries = Object.entries(map);
@@ -1463,7 +1709,8 @@ function renderDefs() {
       h('button', { onclick: () => renameDef(g, name, prompt(t('defs.renamePrompt'), name)?.trim()) }, t('defs.rename')),
       h('button', { class: 'danger', onclick: () => {
         const used = (REFS[g]?.() ?? []).filter(([o, f]) => o[f] === name).length;
-        if (used && !confirm(t('defs.deleteUsedConfirm', { name, n: used }))) return;
+        if (used) { hint(t('defs.deleteUsedConfirm', { name, n: used })); return; }
+        try { validateDefChange(doc, g, name, null); } catch (error) { hint(error.message); return; }
         const del = () => { delete map[name]; refreshDefs(g); defName = null; renderDefs(); };
         const add = () => { map[name] = rec; refreshDefs(g); defName = name; renderDefs(); };
         del(); hist.custom(t('hist.deleteType', { name }), 'def', add, del);
@@ -1476,7 +1723,10 @@ function renderDefs() {
     kind: g,
     subKind: (key) => (g === 'furniture' && key === 'parts' ? 'fpart' : key),
     sugg: (sub, field) => suggestions(doc, sub, field),
-    edit: (fn, label) => hist.edit('def', rec, fn, `${name}: ${label}`, () => { refreshDefs(g, name); renderDefs(); }),
+    edit: (fn, label) => {
+      try { hist.edit('def', rec, (r) => { fn(r); validateDefChange(doc, g, name, r); }, `${name}: ${label}`, () => { refreshDefs(g, name); renderDefs(); }); }
+      catch (error) { hint(error.message); }
+    },
   });
 }
 
@@ -1503,6 +1753,7 @@ function renderFind() {
     const q = findText.trim().toLowerCase().split(/\s+/).filter(Boolean);
     let n = 0;
     for (const [kind, K] of Object.entries(KINDS)) {
+      if (kind === 'train') continue;
       if (findKind && kind !== findKind) continue;
       const arr = K.list(doc.layers) ?? [];
       for (let i = 0; i < arr.length && n < 300; i++) {
@@ -1517,7 +1768,7 @@ function renderFind() {
   el.append(h('div', { class: 'row' },
     h('input', { type: 'text', placeholder: t('find.placeholder'), value: findText, style: 'flex:1', oninput: (e) => { findText = e.target.value; run(); } }),
     h('select', { onchange: (e) => { findKind = e.target.value; run(); } }, h('option', { value: '' }, t('find.all')),
-      Object.entries(KINDS).map(([k, K]) => h('option', { value: k, selected: k === findKind }, K.label)))), results);
+      Object.entries(KINDS).filter(([k]) => k !== 'train').map(([k, K]) => h('option', { value: k, selected: k === findKind }, K.label)))), results);
   run();
 }
 
@@ -1610,7 +1861,7 @@ function renderScript() {
 
 // ---------------------------------------------------------------- layers
 const LAYER_LABELS = { terrain: 'common.terrain', roads: 'layers.roads', roadGraph: 'layers.roadGraph', furniture: 'layers.furniture', blocks: 'layers.blocks',
-  surfaces: 'layers.surfaces', trees: 'layers.trees', rails: 'layers.rails', wind: 'layers.wind', trains: 'layers.trains', cables: 'layers.cables', grid: 'layers.grid' };
+  surfaces: 'layers.surfaces', trees: 'layers.trees', rails: 'layers.rails', wind: 'layers.wind', cables: 'layers.cables', grid: 'layers.grid' };
 function applyVisibility() {
   for (const [k, on] of Object.entries(vis)) { const g = k === 'roadGraph' ? roadGraph : world?.groups[k]; if (g) g.visible = on; }
   world?.setGrid(vis.grid);
@@ -1622,7 +1873,7 @@ function renderLayers() {
     box.append(h('label', {}, h('input', { type: 'checkbox', checked: vis[k], onchange: (e) => { vis[k] = e.target.checked; applyVisibility(); } }), t(label)));
   }
   el.append(box, h('div', { class: 'actions' },
-    h('button', { onclick: () => { const on = !world.night; world.setNight(on); hemi.intensity = on ? 0.18 : 1.1; sun.intensity = on ? 0.08 : 1.6; } }, t('layers.dayNight'))));
+    h('button', { onclick: toggleNight }, t('layers.dayNight'))));
   if (doc) {
     const info = Object.entries(doc.layers).map(([k]) => `${k}${chunks[k] ? ' · ' + (chunks[k].length / 1e6).toFixed(2) + ' ' + t('common.mb') : ''}`);
     el.append(h('div', { class: 'muted', style: 'margin-top:10px' }, t('layers.fileLayers'), info.join(', ')),
@@ -1652,25 +1903,70 @@ function fly(dt) {
 }
 
 // ---------------------------------------------------------------- loop
+function applyQuality(q) {
+  if (!['low', 'medium', 'high'].includes(q)) throw new Error('quality must be low, medium or high');
+  renderQuality = q;
+  if (world && world.quality !== q) world.setQuality(q);
+  renderer.setPixelRatio(Math.min(devicePixelRatio, q === 'low' ? 1 : q === 'high' ? 2 : 1.5));
+  renderer.setSize(innerWidth, innerHeight); lighting.setQuality(q);
+  try { localStorage.setItem('city-labs-quality', q); } catch { /* private mode */ }
+  const select = document.getElementById('render-quality'); if (select) select.value = q;
+}
+function toggleNight() { if (world) { world.setNight(!world.night); lighting.setNight(world.night); } }
+let metricsVisible = false, frameTimes = [], lastHud = 0;
+const viewportBar = h('div', { class: 'viewport-toolbar', role: 'toolbar' });
+const metricsHud = h('div', { class: 'viewport-metrics', hidden: true });
+document.body.append(viewportBar, metricsHud);
+function renderViewportBar() {
+  const ru = getLang() === 'ru'; viewportBar.replaceChildren();
+  viewportBar.append(
+    h('button', { title: ru ? 'Вид сверху' : 'Top view', onclick: () => { const d = camera.position.distanceTo(controls.target); camera.position.copy(controls.target).add(new THREE.Vector3(0, -0.001, d)); controls.update(); } }, '2D'),
+    h('button', { title: ru ? 'Перспектива' : 'Perspective', onclick: () => { const d = camera.position.distanceTo(controls.target); camera.position.copy(controls.target).add(new THREE.Vector3(-0.12, -0.78, 0.62).normalize().multiplyScalar(d)); controls.update(); } }, '3D'),
+    h('button', { title: ru ? 'Показать всю карту' : 'Frame city', onclick: frameWorld }, ru ? 'Вся карта' : 'Frame city'),
+    h('button', { title: ru ? 'Освещение день/ночь · N' : 'Day/night · N', onclick: toggleNight }, '◐'),
+    h('button', { title: ru ? 'Статистика рендера' : 'Render statistics', 'aria-pressed': metricsVisible, onclick: (e) => { metricsVisible = !metricsVisible; metricsHud.hidden = !metricsVisible; e.currentTarget.setAttribute('aria-pressed', metricsVisible); } }, 'GPU'),
+    h('select', { id: 'render-quality', 'aria-label': ru ? 'Качество графики' : 'Graphics quality', onchange: (e) => applyQuality(e.target.value) },
+      [['low', ru ? 'Экономичный' : 'Performance'], ['medium', ru ? 'Сбалансированный' : 'Balanced'], ['high', ru ? 'Высокий · тени' : 'High · shadows']].map(([value, label]) => h('option', { value, selected: renderQuality === value }, label))),
+  );
+}
+renderViewportBar();
 addEventListener('resize', () => { camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight); });
 let lastT = performance.now();
 renderer.setAnimationLoop((ms) => {
-  const dt = Math.min((ms - lastT) / 1000, 0.1); lastT = ms;
+  const frameMS = ms - lastT, dt = Math.min(frameMS / 1000, 0.1); lastT = ms;
   if (moveEv) { onMove(moveEv); moveEv = null; }
   if (drag?.type === 'brush') strokeApply(dt);
   if (held.size) fly(dt);
   live.flush();
   for (const f of tickers) f(ms / 1000);
   controls.update();
+  world?.update(camera);
+  lighting.update(camera, controls.target);
   renderer.render(scene, camera);
+  frameTimes.push(frameMS); if (frameTimes.length > 120) frameTimes.shift();
+  if (metricsVisible && ms - lastHud > 500) {
+    lastHud = ms; const sorted = [...frameTimes].sort((a, b) => a - b), r = renderer.info.render, m = renderer.info.memory;
+    metricsHud.textContent = `${r.calls} draws · ${(r.triangles / 1e6).toFixed(2)} M tris\np50 ${(sorted[Math.floor(sorted.length * 0.5)] ?? 0).toFixed(1)} ms · p95 ${(sorted[Math.floor(sorted.length * 0.95)] ?? 0).toFixed(1)} ms\n${m.geometries} geometries · ${m.textures} textures`;
+  }
 });
 addEventListener('beforeunload', (ev) => { if (dirty.size) { saveNow(); ev.preventDefault(); } });
 
 // scripted access (screenshots, console)
 window.editor = {
+  metrics: () => ({ render: { ...renderer.info.render }, memory: { ...renderer.info.memory }, programs: renderer.info.programs?.length, world: world?.stats(), camera: camera.position.toArray(), quality: renderQuality, pixelRatio: renderer.getPixelRatio() }),
+  setQuality: applyQuality,
   setView(px, py, pz, tx, ty, tz) { camera.position.set(px, py, pz); controls.target.set(tx, ty, tz); controls.update(); },
   select: (kind, i) => select(kind, kind ? list(kind)[i] : null), get doc() { return doc; }, get world() { return world; }, get sel() { return sel; },
-  hist, setTool, saveNow, focus: focusSel, toScreen, handles: () => handles.map((hd) => toScreen(hd.p[0], hd.p[1], hd.z)),
+  hist, setTool, saveNow, focus: focusSel, toScreen, handles: () => handles.map((hd) => toScreen(...ringPoint(hd.ring, hd.i))),
+  call: mcpCall,
+  capture(width) {
+    world?.update(camera); lighting.update(camera, controls.target);
+    renderer.render(scene, camera);
+    const src = renderer.domElement;
+    if (!width || width >= src.width) return src.toDataURL('image/png');
+    const out = document.createElement('canvas'); out.width = Math.max(1, Math.floor(width)); out.height = Math.max(1, Math.round(src.height * out.width / src.width));
+    out.getContext('2d').drawImage(src, 0, 0, out.width, out.height); return out.toDataURL('image/png');
+  },
 };
 
 // ---------------------------------------------------------------- language
@@ -1678,6 +1974,8 @@ function renderAll() {
   applyDom();
   hint(); updateUndo(); setSaveState(saveState); if (doc) renderSource();
   if (doc) { renderProps(); renderDefs(); renderLayers(); renderFind(); renderScript(); renderGen(); setTool(tool); }
+  materialPanel?.refresh();
+  renderViewportBar();
   if (lastUpdate) renderUpdate(lastUpdate);
 }
 $('lang').append(...Object.entries(LANGS).map(([k, name]) => h('option', { value: k, selected: k === getLang() }, name)));

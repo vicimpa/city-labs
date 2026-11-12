@@ -23,4 +23,4 @@ const vspbSave = {
   },
 };
 
-export default defineConfig({ root: '.', plugins: [vspbSave], server: { port: 5199, open: '/viewer/' } });
+export default defineConfig({ root: '.', plugins: [vspbSave], server: { port: 5199, open: false } });

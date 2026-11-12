@@ -1,48 +1,55 @@
 {
   "name": "city-labs",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "type": "module",
   "scripts": {
-    "view": "vite --config viewer/vite.config.js",
-    "unpack": "node tools/vspb2json.mjs",
-    "test:vspb": "node test/vspb.compat.mjs && node test/vspb.roundtrip.mjs",
+    "dev": "vite --config viewer/vite.config.js",
     "edit": "vite --config viewer/vite.config.js --open /editor/",
-    "test:roads": "node test/roadbuild.compare.mjs",
-    "migrate": "node tools/migrate_src.mjs",
-    "app": "node app/run.mjs",
+    "view": "vite --config viewer/vite.config.js --open /viewer/",
+    "app": "node desktop/dev.mjs",
     "mcp": "node mcp/stdio.mjs",
-    "test:mcp": "node test/mcp.headless.mjs",
-    "postinstall": "node node_modules/electron/install.js",
-    "test:app": "node test/app.e2e.mjs",
-    "build:app": "node tools/build-app.mjs --asar",
-    "dist": "node tools/build-app.mjs --asar && electron-builder",
-    "test": "node test/i18n.check.mjs && node test/spline.check.mjs && npm run test:vspb && npm run test:mcp && npm run test:roads",
-    "test:update": "node test/app.update.mjs",
-    "build:web": "node tools/build-web.mjs"
+    "unpack": "node tools/vspb2json.mjs",
+    "build": "npm run build:web",
+    "build:web": "node tools/build-web.mjs",
+    "build:app": "node tools/build-app.mjs",
+    "dev:desktop": "vite --config desktop/vite.config.js",
+    "dist": "tauri build",
+    "tauri": "tauri",
+    "check:desktop": "cargo check --manifest-path src-tauri/Cargo.toml",
+    "test": "npm run test:unit && npm run test:integration",
+    "test:unit": "node tests/unit/i18n.test.mjs && node tests/unit/spline.test.mjs && npm run test:vspb && npm run test:authoring && npm run test:render",
+    "test:integration": "npm run test:mcp && npm run test:roads && npm run test:app && npm run test:update",
+    "test:vspb": "node tests/unit/vspb.compat.test.mjs && node tests/unit/vspb.roundtrip.test.mjs",
+    "test:authoring": "node --test tests/unit/authoring.test.mjs tests/unit/commands.test.mjs && node tests/unit/format.robustness.test.mjs && node tests/unit/generators.test.mjs",
+    "test:render": "node tests/unit/render.geometry.test.mjs && node tests/unit/terrain.lod.test.mjs",
+    "test:mcp": "node tests/integration/mcp.test.mjs",
+    "test:roads": "node tests/integration/roadbuild.test.mjs",
+    "test:app": "node tests/integration/desktop.test.mjs",
+    "test:update": "node tests/integration/release.test.mjs",
+    "test:ui": "node tests/browser/materials.test.mjs && node tests/browser/gestures.test.mjs && node tests/browser/workflow.test.mjs && node tests/browser/transparency.test.mjs && node tests/browser/export.test.mjs && node tests/browser/files.test.mjs && node tests/browser/tunnel-shadow.test.mjs",
+    "test:web": "node tests/browser/deployment.test.mjs",
+    "test:desktop": "npm run build:app && npm run test:app && npm run test:update && cargo test --manifest-path src-tauri/Cargo.toml --locked",
+    "benchmark:render": "node tests/benchmarks/render.mjs",
+    "benchmark:roads": "node tests/benchmarks/roads.mjs"
   },
   "dependencies": {
     "@dimforge/rapier3d-compat": "^0.21.0",
     "@modelcontextprotocol/sdk": "^1.32.2",
     "three": "^0.186.1",
-    "zod": "^4.6.7"
+    "zod": "^4.6.7",
+    "@tauri-apps/api": "^2"
   },
   "devDependencies": {
-    "@electron/asar": "^4.3.1",
     "@playwright/test": "^1.64.1",
     "@types/node": "^26.6.5",
     "@types/three": "^0.186.0",
-    "electron": "^45.0.0",
-    "electron-builder": "^26.18.0",
-    "typescript": "5.9",
     "vite": "^8.3.5",
-    "vitest": "^5.0.5"
+    "@tauri-apps/cli": "^2"
   },
-  "main": "app/dev.mjs",
   "productName": "City Labs",
   "description": "City Labs — редактор города: дороги, рельеф, здания и типы в одном файле .vspb, с MCP для ИИ-агентов",
   "cityLabs": {
-    "shell": 2,
     "repo": "vicimpa/city-labs"
   },
   "repository": {
@@ -50,5 +57,8 @@
     "url": "https://github.com/vicimpa/city-labs.git"
   },
   "author": "vicimpa",
-  "license": "MIT"
+  "license": "MIT",
+  "engines": {
+    "node": ">=24"
+  }
 }

@@ -2,6 +2,7 @@
 // ground patches, roads (bridges outlined, tunnels dashed), junctions, buildings, rails, power lines, trees,
 // a coordinate grid and numbered road markers explained in the returned legend.
 // Pure JS (no canvas), so it renders the same in Node and in the editor.
+import { localToWorld } from '../format/transforms.js';
 
 // ---------------------------------------------------------------- raster
 class Raster {
@@ -97,7 +98,11 @@ export function renderMap(doc, { bbox, width = 1024, layers, highlight = [], gra
   const [x0, y0, x1, y1] = bbox, mpp = (x1 - x0) / width, height = Math.max(1, Math.round((y1 - y0) / mpp));
   const R = new Raster(width, height);
   const P = (x, y) => [(x - x0) / mpp, (y1 - y) / mpp];
-  const inView = (pts, pad = 0) => pts.some((p) => p[0] >= x0 - pad && p[0] <= x1 + pad && p[1] >= y0 - pad && p[1] <= y1 + pad);
+  const inView = (pts, pad = 0) => {
+    let xa = Infinity, ya = Infinity, xb = -Infinity, yb = -Infinity;
+    for (const p of pts) { xa = Math.min(xa, p[0]); ya = Math.min(ya, p[1]); xb = Math.max(xb, p[0]); yb = Math.max(yb, p[1]); }
+    return xa <= x1 + pad && xb >= x0 - pad && ya <= y1 + pad && yb >= y0 - pad;
+  };
 
   // terrain: graded heights, hill-shaded, water below sea level
   if (on.has('terrain') && graded) {
@@ -161,13 +166,19 @@ export function renderMap(doc, { bbox, width = 1024, layers, highlight = [], gra
     const [px, py] = P(t[0], t[1]); R.disc(px, py, Math.max(2.4 / mpp, 0.8), [46, 92, 40]);
   }
   if (on.has('buildings')) {
-    const items = (L.buildings?.items ?? []).filter((b) => b.parts?.length && inView(b.parts[0].p ?? [], pad));
+    const topHeights = new Map();
+    const items = (L.buildings?.items ?? []).filter((b) => {
+      const points = []; let top = -Infinity;
+      for (const part of b.parts ?? []) for (const q of part.p ?? []) for (const z of [part.z ?? 0, (part.z ?? 0) + (part.h ?? 0)]) {
+        const p = localToWorld(b, [q[0], q[1], z]); points.push(p); top = Math.max(top, p[2]);
+      }
+      topHeights.set(b, top); return inView(points, pad);
+    });
     // low first, so towers are drawn over their podiums and neighbours
-    const top = (b) => Math.max(...b.parts.map((p) => (p.z ?? 0) + (p.h ?? 0)));
-    items.sort((a, b) => top(a) - top(b));
+    items.sort((a, b) => topHeights.get(a) - topHeights.get(b));
     for (const b of items) for (const part of [...b.parts].sort((p, q) => (p.z + p.h) - (q.z + q.h))) {
       if (!(part.p?.length >= 3)) continue;
-      const rings = [part.p, ...(part.holes ?? [])].map((r) => r.map((q) => P(q[0], q[1])));
+      const rings = [part.p, ...(part.holes ?? [])].map((r) => r.map((q) => { const w = localToWorld(b, [q[0], q[1], (part.z ?? 0) + (part.h ?? 0)]); return P(w[0], w[1]); }));
       R.polygon(rings, mul(hex(L.defs?.materials?.[part.m]?.color, [200, 200, 200]), 0.92));
       if (mpp < 3) R.line([...rings[0], rings[0][0]], 1, [25, 25, 28], { a: 0.55 });
     }
@@ -185,7 +196,7 @@ export function renderMap(doc, { bbox, width = 1024, layers, highlight = [], gra
   }
   // highlighted records: magenta outline + light fill
   for (const { kind, rec } of highlight) {
-    const rings = kind === 'building' ? rec.parts.map((p) => p.p) : rec.p?.[0]?.length ? [rec.p] : rec.pts ? [rec.pts] : null;
+    const rings = kind === 'building' ? rec.parts.map((p) => p.p.map((q) => localToWorld(rec, [q[0], q[1], (p.z ?? 0) + (p.h ?? 0)]))) : rec.p?.[0]?.length ? [rec.p] : rec.pts ? [rec.pts] : null;
     if (rings) for (const r of rings) {
       const pp = r.map((q) => P(q[0], q[1]));
       const open = kind === 'edge' || kind === 'rail' || kind === 'train' || kind === 'powerline';

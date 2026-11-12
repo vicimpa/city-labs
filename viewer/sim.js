@@ -1,5 +1,5 @@
 // Drive test: physical road world (Rapier) + N cars driving random routes over the road graph.
-// Works in Node (tools/drive.mjs) and in the browser viewer. World is Z-up, metres.
+// Works in Node (tools/diagnostics/drive.mjs) and in the browser viewer. World is Z-up, metres.
 
 const SOLID = ['asphalt', 'concrete', 'barrier', 'guardrail', 'curb', 'sidewalk', 'tunnel', 'grass', 'wall', 'metal'];
 const G_WORLD = 0x0001, G_CAR = 0x0002;

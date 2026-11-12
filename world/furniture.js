@@ -1,4 +1,4 @@
-// Roadside furniture placed by the rules in city/docs/ROAD_STANDARDS.md (port of furniture.py).
+// Roadside furniture placed by the rules in docs/ROADS.md.
 // Every item carries `owner` ('e<id>' edge / 'n<id>' node) so it can be regenerated when that road
 // changes; items without an owner were placed by hand and are never touched.
 import { unit, interp, tangents } from './geom.js';

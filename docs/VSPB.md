@@ -1,12 +1,43 @@
-# VSPB — Vespera world binary format (v1.0)
+# VSPB — City Labs world binary format (v2.0)
 
 One file holds the whole world (`city/data/vespera.vspb`): terrain, roads, furniture, buildings and
 the type registry. The file is the source of truth, and it is edited in the editor (`npm run edit`).
-The Python generator is no longer part of the pipeline: its last output was migrated once by
-`tools/migrate_src.mjs` and is kept in `city/data/legacy/` as a reference for `npm run test:roads`.
+Legacy generator outputs are preserved in `tests/fixtures/legacy/` for road compatibility checks;
+`tests/helpers/legacy-world.mjs` reconstructs their source graph for `npm run test:roads`.
 
 Code: `format/vspb.js` (generic codec), `format/world.js` (Vespera layers, column types, default
-registry). Works in browsers and Node 18+ (uses `CompressionStream`).
+registry). Works in browsers and Node 24+ (uses `CompressionStream` with raw DEFLATE).
+
+The v2 writer uses the same self-describing container layout and reads all v1 files.
+Its major version protects the new local-object and compact-heightfield semantics:
+v1 readers refuse v2 files instead of misinterpreting local vertices as world positions.
+`meta.documentVersion = 2` separately identifies the city model; `units = 'metres'`
+and `upAxis = 'Z'`. Unknown columns, nested fields, layers and ancillary chunks survive
+read/write. Readers reject malformed bounds, duplicate tables/columns/map keys,
+invalid parent indices, missing END and oversized payloads (512 MiB file/decompressed
+budget, one million rows per table). Edited numeric columns widen when necessary.
+
+## Local objects and compact heightfields
+
+A building has `transform: {p:[x,y,z], r:[rx,ry,rz], s:[sx,sy,sz]}`. Rotation uses
+Euler XYZ radians; scale components are positive, 0.001–1000. `parts[].p`, holes and
+`z` are local coordinates. `format/transforms.js` migrates v1 vertices once around a
+local pivot without rounding or changing world positions. Geometry and facade UV
+remain local while an instance moves/rotates/scales. Furniture uses authoritative
+`p`, yaw `h`, optional `tilt:[rx,ry]`, `scale:[sx,sy,sz]` and `material` override;
+prefab geometry is already local. There is no redundant saved matrix.
+
+At runtime, terrain exposes complete `base` and graded `h` arrays. On disk,
+Float32 terrain with at most half its cells changed uses
+`heightEncoding:'sparse-grade-v1'`, `gradeIndex:u32[]!`, `gradeHeight:f32[]!` in place
+of `h`. Indices are strictly increasing; overrides hold absolute heights, so even
+signed-zero bits are preserved. Decode copies `base` then applies overrides and
+removes the storage-only fields. Dense differences and Float64 source schemas
+retain dense `h`, preserving precision. `decodeWorld`, not raw `decode`, expands
+the city model. Raw `decode/encode` remains a lossless generic container API.
+
+Derived mesh buffers are not saved. Use `encodeWorld`/`encodeWorldLayer` for compact saving and `decodeWorld`
+for loading. Browser working copies use the same encoded layers.
 
 ## Compatibility rules
 
@@ -87,10 +118,10 @@ Column flags: 1 typed, 2 presence bitmap (a row without the bit has no such fiel
 
 | layer | contents |
 | --- | --- |
-| `terrain` | `x0 y0 res nx ny sea_level`, `base: f32[]!` (natural ground, row-major), `h: f32[]!` (ground graded to the roads, derived), `bore: u32[]!` (cells inside tunnels, derived) |
+| `terrain` | `x0 y0 res nx ny sea_level`, `base: f32[]!` (natural ground, row-major), runtime `h` / sparse graded overrides (above), `bore: u32[]!` (cells inside tunnels) |
 | `roads` | `classes` (map: `lanes lane_w shoulder median side corner prio r sigma max_grade k_min oneway`, plus derived `hw hwt`), `nodes {id, p [x,y,z], kind, grad [gx,gy], free?}`, `edges {id, name, cls, n [node, node], trim, pts f32x3[] (4 m apart), elev, tunnel, merge?}` |
-| `furniture` | `items {t, p f32x3, h (heading, rad), …per-type extras, owner?}`. `owner` is `e<id>` or `n<id>` for items placed by the road rules. |
-| `buildings` | `items {type, zone, parts[{p f32x2[], holes?, z, h, m}]}`, `surfaces {p, holes?, m}`, `trees f32x3[]`, `rails f32x3[][]`, `cables`, `wind f32x4[]`, `trains {pts, closed}`, `core` |
+| `furniture` | `items {t, p f32x3, h (heading, rad), tilt?, scale?, material?, …per-type extras, owner?}`. `owner` is `e<id>` or `n<id>` for items placed by the road rules. |
+| `buildings` | `items {type, zone, transform, detail?, parts[{p f32x2[], holes?, z, h, m, roofMaterial?, trimMaterial?}]}` (local parts); world-space `surfaces {p, holes?, m}`, `trees f32x3[]`, `rails f32x3[][]`, `cables`, `wind f32x4[]`, preserved legacy `trains` (not rendered), `core` |
 | `defs` | type registry, below |
 | `issues` | generator QA notes (not rendered) |
 
@@ -119,7 +150,7 @@ Everything a renderer used to hard-code lives here, so a new type is just a new 
 
 | map | entry fields | used for |
 | --- | --- | --- |
-| `materials` | `color, shininess, specular, glow, nightGlow, facade` (`wall` / `curtain` / `brick` / `ribs` / '') | building parts' `m` |
+| `materials` | PBR `color, roughness, metalness, opacity, emissive, emissiveIntensity, facade`; legacy `shininess, specular, glow, nightGlow` preserved | building `m/roofMaterial/trimMaterial`, furniture `material`, prefab parts' `m` |
 | `buildingTypes` | `wall` (`office` / `house` / '' = no facade texture) | `items[].type` |
 | `zones` | `color` | `items[].zone` |
 | `surfaces` | `color, lift` | `surfaces[].m` |
@@ -127,10 +158,13 @@ Everything a renderer used to hard-code lives here, so a new type is just a new 
 | `roadMaterials` | `color, paint?, unlit?` | `roads.mesh` keys |
 | `roadClasses` | `color` | road graph overlay |
 
-A facade texture applies when the part's type has a `wall` and the material has a `facade`. The
-material's `wall` facade takes the type's wall style. Unknown names render magenta. When a file
-lacks registry entries, the reader fills them from `DEFAULT_DEFS` (`withDefaults`). Entries that are
-present are never overwritten.
+An explicit facade style applies independently of building type. The special
+`facade:'wall'` resolves the type's wall style. Facades use local wall-distance UVs;
+texture caches hold colour, relief and window-emission maps. Prop overrides use
+PBR without metre-based facade mapping. Missing references are rejected at command
+boundaries. In v1 migration, missing defaults are added; in v2, existing registries
+are authoritative and a deliberately deleted unused entry is not resurrected.
+Used resources cannot be deleted without first assigning replacements.
 
 ## Tools
 
@@ -139,7 +173,7 @@ npm run edit        # editor at http://localhost:5199/editor/
 npm run view        # viewer
 npm run unpack      # vespera.vspb → city/data/unpacked/<layer>.json, for diffing or reading
 npm run test:vspb   # format compatibility rules + decode/encode round-trip of the real world
-npm run test:roads  # JS road builder vs the generator's last output (city/data/legacy)
+npm run test:roads  # JS road builder vs the generator's last output (tests/fixtures/legacy)
 ```
 
 In the editor, roads are edited as a graph:

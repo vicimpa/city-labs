@@ -3,6 +3,7 @@ import * as THREE from 'three';
 import { MapControls } from 'three/examples/jsm/controls/MapControls.js';
 import { World3D, heightAt } from './world3d.js';
 import { loadWorld } from '../format/world.js';
+import { cityLighting } from './lighting.js';
 
 const DATA = new URLSearchParams(location.search).get('world') ?? '/city/data/vespera.vspb';
 const renderer = new THREE.WebGLRenderer({ antialias: true, logarithmicDepthBuffer: true });
@@ -30,11 +31,7 @@ controls.maxPolarAngle = Math.PI * 0.48;           // never look from below the 
 controls.target.set(0, 0, 0);
 controls.update();
 
-const hemi = new THREE.HemisphereLight(0xcfd8e6, 0x2a2f25, 1.1);
-scene.add(hemi);
-const sun = new THREE.DirectionalLight(0xffe2c0, 1.6);
-sun.position.set(-3000, -2000, 4000);
-scene.add(sun);
+const lighting = cityLighting(renderer, scene);
 
 const layers = {};
 const NIGHT = { on: false };
@@ -53,7 +50,7 @@ const status = document.getElementById('status');
 let world = null;
 try {
   const doc = await loadWorld(DATA);
-  world = new World3D(doc, { anisotropy: renderer.capabilities.getMaxAnisotropy(), tickers }).buildAll();
+  world = new World3D(doc, { anisotropy: renderer.capabilities.getMaxAnisotropy(), tickers, tileSize: 600, showTrains: false, animateTrains: false }).buildAll();
   for (const name of ['terrain', 'roads', 'furniture', 'buildings']) addLayer(name, world.groups[name]);
   const { roads, terrain } = doc.layers;
   // physics takes the road mesh built from the graph (not stored in the file)
@@ -188,8 +185,7 @@ nightBtn.textContent = 'Ночь'; nightBtn.style.margin = '6px 0 0 6px';
 document.getElementById('ui').appendChild(nightBtn);
 function setNight(on) {
   NIGHT.on = on; nightBtn.textContent = on ? 'День' : 'Ночь';
-  hemi.intensity = on ? 0.18 : 1.1; sun.intensity = on ? 0.08 : 1.6;
-  scene.background.set(on ? 0x05070c : 0x0b0f14);
+  lighting.setNight(on);
   world?.setNight(on);
 }
 nightBtn.onclick = () => setNight(!NIGHT.on);
@@ -204,10 +200,10 @@ renderer.domElement.addEventListener('dblclick', (ev) => {
   if (hit) { controls.target.copy(hit.point); controls.update(); }
 });
 // expose for scripted screenshots
-window.viewer = { camera, controls, scene, setView(px, py, pz, tx, ty, tz) {
+window.viewer = { camera, controls, scene, get world() { return world; }, metrics: () => ({ render: { ...renderer.info.render }, memory: { ...renderer.info.memory } }), setView(px, py, pz, tx, ty, tz) {
   camera.position.set(px, py, pz); controls.target.set(tx, ty, tz); controls.update(); } };
 
 addEventListener('resize', () => {
   camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight);
 });
-renderer.setAnimationLoop((ms) => { for (const f of tickers) f(ms / 1000); stepDrive(ms); if (!player) controls.update(); renderer.render(scene, camera); });
+renderer.setAnimationLoop((ms) => { for (const f of tickers) f(ms / 1000); stepDrive(ms); if (!player) controls.update(); world?.update(camera); lighting.update(camera, controls.target); renderer.render(scene, camera); });

@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main",
+  "description": "Only the bundled editor may use selected-document commands",
+  "windows": ["main"],
+  "permissions": ["allow-host-action", "core:event:allow-listen", "core:event:allow-unlisten"]
+}

@@ -4,12 +4,16 @@
 // Works in the browser and in Node (needs CompressionStream / Response).
 
 export const MAGIC = 'VSPB';
-export const VERSION = { major: 1, minor: 0 };
+// v2 marks the local-object/compact-heightfield world model as incompatible with
+// old world renderers. The self-describing container layout stays unchanged;
+// this reader retains full support for v1 files.
+export const VERSION = { major: 2, minor: 0 };
 
 const CH_CRITICAL = 1;                // chunk flag: a reader that doesn't know the tag must refuse the file
 const CODEC_NONE = 0, CODEC_DEFLATE = 1;
 const COL_TYPED = 1, COL_PRESENCE = 2, COL_SHUFFLE = 4;
 const MODE_ROWS = 0, MODE_MAP = 1, MODE_PROPS = 2;
+const MAX_BYTES = 512 * 1024 * 1024, MAX_ROWS = 1_000_000, MAX_VALUES = 32_000_000;
 export const KEY = '$key', PARENT = '$parent';
 
 const BASES = ['', 'u8', 'i8', 'u16', 'i16', 'u32', 'i32', 'f32', 'f64', 'bool', 'str', 'json'];
@@ -69,11 +73,12 @@ export function inferSpec(vals) {
 export function fits(c, vals) {
   const leafOk = (v) => {
     if (c.base === B.json) return true;
-    if (c.arity > 1) return isList(v) && v.length === c.arity && Array.prototype.every.call(v, (x) => typeof x === 'number');
+    if (c.arity > 1) return isList(v) && v.length === c.arity && Array.prototype.every.call(v, (x) => fits({ ...c, arity: 1, depth: 0 }, [x]));
     if (c.base === B.str) return typeof v === 'string';
     if (c.base === B.bool) return typeof v === 'boolean';
     if (typeof v !== 'number') return false;
-    if (c.base >= B.f32) return true;
+    if (c.base === B.f64) return true;
+    if (c.base === B.f32) return !Number.isFinite(v) || Math.abs(v) <= 3.4028234663852886e38;
     const [lo, hi] = RANGE[c.base];
     return Number.isInteger(v) && v >= lo && v <= hi;
   };
@@ -81,7 +86,7 @@ export function fits(c, vals) {
     if (v === undefined) return d === c.depth;          // absent rows only at the top
     if (d === 0) return leafOk(v);
     if (!isList(v)) return false;
-    if (d === 1 && c.arity === 1 && isNum(c.base) && ArrayBuffer.isView(v)) return true;
+    if (d === 1 && c.arity === 1 && isNum(c.base) && v instanceof ARR[c.base]) return true;
     for (const x of v) if (x === undefined || !ok(x, d - 1)) return false;
     return true;
   };
@@ -109,14 +114,16 @@ class Writer {
 }
 class Reader {
   constructor(u8) { this.u8 = u8; this.dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength); this.n = 0; }
-  align(a) { this.n += (a - (this.n % a)) % a; }          // relative to the payload start, like Writer
-  u8_() { return this.u8[this.n++]; }
-  u16() { const v = this.dv.getUint16(this.n, true); this.n += 2; return v; }
-  u32() { const v = this.dv.getUint32(this.n, true); this.n += 4; return v; }
-  str() { const k = this.u32(), s = TD.decode(this.u8.subarray(this.n, this.n + k)); this.n += k; return s; }
+  need(k) { if (!Number.isSafeInteger(k) || k < 0 || this.n + k > this.u8.length) throw new Error('vspb: truncated or corrupt table'); }
+  align(a) { const p = (a - (this.n % a)) % a; this.need(p); this.n += p; }
+  u8_() { this.need(1); return this.u8[this.n++]; }
+  u16() { this.need(2); const v = this.dv.getUint16(this.n, true); this.n += 2; return v; }
+  u32() { this.need(4); const v = this.dv.getUint32(this.n, true); this.n += 4; return v; }
+  str() { const k = this.u32(); this.need(k); const s = TD.decode(this.u8.subarray(this.n, this.n + k)); this.n += k; return s; }
   // typed view if aligned, copy otherwise
   arr(Ctor, count) {
     const bytes = count * Ctor.BYTES_PER_ELEMENT, off = this.u8.byteOffset + this.n;
+    this.need(bytes);
     const a = off % Ctor.BYTES_PER_ELEMENT === 0 ? new Ctor(this.u8.buffer, off, count)
       : new Ctor(this.u8.slice(this.n, this.n + bytes).buffer);
     this.n += bytes; return a;
@@ -137,9 +144,13 @@ function unshuffle(u8, size) {
 }
 
 // ---------------------------------------------------------------- compression
-async function pipe(u8, stream) { return new Uint8Array(await new Response(new Blob([u8]).stream().pipeThrough(stream)).arrayBuffer()); }
+async function pipe(u8, stream, limit = MAX_BYTES) {
+  let size = 0;
+  const bounded = new TransformStream({ transform(bytes, controller) { size += bytes.length; if (size > limit) throw new Error('vspb: decompressed chunk exceeds declared size'); controller.enqueue(bytes); } });
+  return new Uint8Array(await new Response(new Blob([u8]).stream().pipeThrough(stream).pipeThrough(bounded)).arrayBuffer());
+}
 const deflate = (u8) => pipe(u8, new CompressionStream('deflate-raw'));
-const inflate = (u8) => pipe(u8, new DecompressionStream('deflate-raw'));
+const inflate = (u8, size) => pipe(u8, new DecompressionStream('deflate-raw'), size);
 
 // ---------------------------------------------------------------- column encode
 function writeColumn(w, name, spec, vals) {
@@ -201,23 +212,33 @@ function writeColumn(w, name, spec, vals) {
 function readColumn(r, rows) {
   const name = r.str(), base = r.u8_(), arity = r.u8_(), depth = r.u8_(), flags = r.u8_();
   if (!ARR[base]) throw new Error(`vspb: column ${name} has unknown type ${base}`);
+  if (!arity || depth > 16 || flags & ~(COL_TYPED | COL_PRESENCE | COL_SHUFFLE)) throw new Error(`vspb: unsupported column layout ${name}`);
   let present = null;
-  if (flags & COL_PRESENCE) { present = r.u8.slice(r.n, r.n + ((rows + 7) >> 3)); r.n += (rows + 7) >> 3; }
+  if (flags & COL_PRESENCE) { r.need((rows + 7) >> 3); present = r.u8.slice(r.n, r.n + ((rows + 7) >> 3)); r.n += (rows + 7) >> 3; }
   const offsets = [];
   let n = rows;
-  for (let d = 0; d < depth; d++) { r.align(4); const off = r.arr(Uint32Array, n + 1); offsets.push(off); n = off[n]; }
+  for (let d = 0; d < depth; d++) {
+    r.align(4); const off = r.arr(Uint32Array, n + 1);
+    if (off[0] !== 0 || off[n] > MAX_VALUES) throw new Error(`vspb: invalid list offsets ${name}`);
+    for (let i = 1; i <= n; i++) if (off[i] < off[i - 1]) throw new Error(`vspb: unordered list offsets ${name}`);
+    offsets.push(off); n = off[n];
+  }
   let dict = null;
   if (base === B.str || base === B.json) {
-    dict = Array.from({ length: r.u32() }, () => r.str());
+    const count = r.u32(); if (count > MAX_ROWS || count * 4 > r.u8.length - r.n) throw new Error(`vspb: invalid dictionary ${name}`);
+    dict = Array.from({ length: count }, () => r.str());
     if (base === B.json) dict = dict.map((s) => JSON.parse(s));
   }
   const count = r.u32(), Ctor = ARR[base];
+  if (count !== n * arity || count > MAX_VALUES) throw new Error(`vspb: invalid value count ${name}`);
   r.align(8);
   let values;
   if (flags & COL_SHUFFLE) {
     const k = count * Ctor.BYTES_PER_ELEMENT;
+    r.need(k);
     values = new Ctor(unshuffle(r.u8.subarray(r.n, r.n + k), Ctor.BYTES_PER_ELEMENT).buffer); r.n += k;
   } else values = r.arr(Ctor, count);
+  if (dict) for (const i of values) if (i >= dict.length) throw new Error(`vspb: invalid dictionary index ${name}`);
   const spec = { base, arity, depth, typed: !!(flags & COL_TYPED) };
   const f32 = base === B.f32;
   const num = (k) => (f32 ? +values[k].toPrecision(7) : values[k]);
@@ -293,12 +314,14 @@ function encodeTable(t, hints) {
 function decodeTable(u8) {
   const r = new Reader(u8);
   const name = r.str(), parent = r.str(), mode = r.u8_(), rows = r.u32(), ncols = r.u16();
+  if (!name || name.length > 4096 || [name, parent].some((v) => v.split('.').some((p) => ['__proto__', 'constructor', 'prototype'].includes(p))) || rows > MAX_ROWS || mode > MODE_PROPS || (mode === MODE_PROPS && rows !== 1)) throw new Error('vspb: invalid table header');
   const cols = [];
-  for (let c = 0; c < ncols; c++) cols.push(readColumn(r, rows));
+  const names = new Set();
+  for (let c = 0; c < ncols; c++) { const column = readColumn(r, rows); if (names.has(column.name)) throw new Error(`vspb: duplicate column ${column.name}`); names.add(column.name); cols.push(column); }
   const out = new Array(rows);
   for (let i = 0; i < rows; i++) {
     const rec = {};
-    for (const c of cols) { const v = c.get(i); if (v !== undefined) rec[c.name] = v; }
+    for (const c of cols) { const v = c.get(i); if (v !== undefined) Object.defineProperty(rec, c.name, { value: v, enumerable: true, writable: true, configurable: true }); }
     out[i] = rec;
   }
   return { name, parent, mode, rows: out, specs: Object.fromEntries(cols.map((c) => [c.name, c.spec])) };
@@ -339,9 +362,10 @@ export async function assemble(meta, layerChunks, unknown = []) {
 
 /** Encode a whole document { meta, layers: {name: layer} }. */
 export async function encode(doc, opts = {}) {
-  const chunks = {};
-  for (const [name, layer] of Object.entries(doc.layers)) chunks[name] = await encodeLayer(name, layer, optsFor(doc, opts));
-  return assemble(doc.meta ?? {}, chunks, doc.unknown);
+  const meta = structuredClone(doc.meta ?? {}), options = optsFor(doc, opts);
+  // Encode all layers up to their first compression await before yielding.
+  const parts = Object.entries(doc.layers).map(([name, layer]) => encodeLayer(name, layer, options).then((bytes) => [name, bytes]));
+  return assemble(meta, Object.fromEntries(await Promise.all(parts)), doc.unknown);
 }
 export function optsFor(doc, { hints = {}, kinds = {} } = {}) {
   // types read from the file win over defaults, so a re-save never changes a column's type
@@ -353,28 +377,39 @@ export function optsFor(doc, { hints = {}, kinds = {} } = {}) {
 export async function decode(input) {
   const u8 = input instanceof Uint8Array ? input : new Uint8Array(input);
   if (TD.decode(u8.subarray(0, 4)) !== MAGIC) throw new Error('vspb: not a VSPB file');
+  if (u8.length < 16 || u8.length > MAX_BYTES) throw new Error('vspb: invalid file size');
   const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
   const version = { major: dv.getUint16(4, true), minor: dv.getUint16(6, true) };
   if (version.major > VERSION.major) throw new Error(`vspb: file version ${version.major}.${version.minor} is newer than this reader (${VERSION.major}.x)`);
-  let p = 16, meta = {};
+  if (version.major < 1) throw new Error('vspb: invalid format version');
+  let p = 16, meta = {}, ended = false, totalRaw = 0, count = 0;
   const tasks = [], unknown = [];
+  const schedule = (promise) => { promise.catch(() => {}); tasks.push(promise); };
   while (p + 16 <= u8.length) {
     const tag = TD.decode(u8.subarray(p, p + 4)), flags = dv.getUint32(p + 4, true);
     const raw = dv.getUint32(p + 8, true), stored = dv.getUint32(p + 12, true);
+    if (stored > u8.length - p - 16 || raw > MAX_BYTES || (totalRaw += raw) > MAX_BYTES || ++count > 100_000) throw new Error('vspb: corrupt chunk bounds or file budget exceeded');
     const body = u8.subarray(p + 16, p + 16 + stored);
     p += 16 + stored; p += (8 - (p % 8)) % 8;
-    if (tag === 'END ') break;
+    if (tag === 'END ') { if (stored || raw) throw new Error('vspb: corrupt END chunk'); ended = true; break; }
     const codec = (flags >> 8) & 0xff;
-    const data = codec === CODEC_DEFLATE ? inflate(body) : codec === CODEC_NONE ? Promise.resolve(body) : null;
+    if (tag !== 'META' && tag !== 'TABL') {
+      if (flags & CH_CRITICAL) throw new Error(`vspb: unsupported critical chunk ${tag}`);
+      unknown.push({ tag, flags, raw, body: body.slice() }); continue;
+    }
+    const data = codec === CODEC_DEFLATE ? inflate(body, raw) : codec === CODEC_NONE ? Promise.resolve(body) : null;
     if (!data) throw new Error(`vspb: chunk ${tag} uses unknown codec ${codec}`);
-    if (tag === 'META') tasks.push(data.then((d) => { meta = JSON.parse(TD.decode(d)); }));
-    else if (tag === 'TABL') tasks.push(data.then((d) => { if (d.length !== raw) throw new Error('vspb: corrupt chunk'); return decodeTable(d); }));
-    else if (flags & CH_CRITICAL) throw new Error(`vspb: unsupported critical chunk ${tag}`);
-    else unknown.push({ tag, flags, raw, body: body.slice() });   // ancillary: not understood, written back as is
+    if (tag === 'META') schedule(data.then((d) => {
+      if (d.length !== raw) throw new Error('vspb: corrupt metadata chunk'); meta = JSON.parse(TD.decode(d));
+      if (!meta || typeof meta !== 'object' || Array.isArray(meta)) throw new Error('vspb: invalid metadata');
+    }));
+    else schedule(data.then((d) => { if (d.length !== raw) throw new Error('vspb: corrupt chunk'); return decodeTable(d); }));
   }
+  if (!ended) { await Promise.allSettled(tasks); throw new Error('vspb: missing END chunk or truncated file'); }
   const tables = (await Promise.all(tasks)).filter(Boolean);
-  const layers = {}, byName = {}, hints = {}, kinds = {};
+  const layers = {}, byName = Object.create(null), hints = {}, kinds = {};
   for (const t of tables) {
+    if (Object.hasOwn(byName, t.name)) throw new Error(`vspb: duplicate table ${t.name}`);
     byName[t.name] = t;
     for (const [c, s] of Object.entries(t.specs)) if (c !== KEY && c !== PARENT) hints[t.name + '.' + c] = s;
     const dot = t.name.lastIndexOf('.'), field = t.name.slice(dot + 1);
@@ -384,10 +419,16 @@ export async function decode(input) {
       const P = byName[t.parent];
       if (!P) throw new Error(`vspb: table ${t.name} before its parent`);
       for (const row of P.rows) row[field] ??= [];
-      for (const row of t.rows) { const i = row[PARENT]; delete row[PARENT]; P.rows[i][field].push(row); }
+      for (const row of t.rows) { const i = row[PARENT]; if (!Number.isInteger(i) || i < 0 || i >= P.rows.length) throw new Error(`vspb: invalid parent index in ${t.name}`); delete row[PARENT]; P.rows[i][field].push(row); }
     } else {
       const L = (layers[t.name.slice(0, dot)] ??= {});
-      if (t.mode === MODE_MAP) L[field] = Object.fromEntries(t.rows.map((row) => { const k = row[KEY]; delete row[KEY]; return [k, row]; }));
+      if (t.mode === MODE_MAP) {
+        const keys = new Set();
+        L[field] = Object.fromEntries(t.rows.map((row) => {
+          const k = row[KEY]; if (typeof k !== 'string' || keys.has(k)) throw new Error(`vspb: missing or duplicate map key in ${t.name}`);
+          keys.add(k); delete row[KEY]; return [k, row];
+        }));
+      }
       else L[field] = t.rows;
     }
   }
