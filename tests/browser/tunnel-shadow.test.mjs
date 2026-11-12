@@ -31,10 +31,14 @@ try {
       m.geometry.index.needsUpdate = true; m.geometry.computeVertexNormals();
     } }, meanNormalZ() { let sum = 0, count = 0; for (const m of meshes) { const n = m.geometry.attributes.normal; for (let i = 0; i < n.count; i++) { sum += n.getZ(i); count++; } } return sum / count; } };
   });
-  const frames = async () => page.evaluate(async () => { for (let i = 0; i < 12; i++) await new Promise(requestAnimationFrame); });
+  // Two app frames settle matrices/LOD; capture() then renders and reads back the GPU.
+  const frames = async () => page.evaluate(async () => { for (let i = 0; i < 2; i++) await new Promise(requestAnimationFrame); });
   const pixels = async () => page.evaluate(async () => {
     const image = await createImageBitmap(await (await fetch(editor.capture())).blob()), c = document.createElement('canvas'); c.width = image.width; c.height = image.height;
-    const context = c.getContext('2d'); context.drawImage(image, 0, 0); image.close(); return { data: [...context.getImageData(0, 0, c.width, c.height).data], width: c.width };
+    const context = c.getContext('2d'); context.drawImage(image, 0, 0); image.close();
+    // Read the original full-resolution pixels, but transfer only the oracle ROI and neighbours.
+    const x = 455, y = 422, width = 188, height = 31;
+    return { data: [...context.getImageData(x, y, width, height).data], width, x, y };
   });
   await frames(); const medium = await pixels();
   await page.evaluate(() => editor.setQuality('high')); await frames();
@@ -47,7 +51,7 @@ try {
     let sum = 0, count = 0;
     // Interior portions of the two roof planes in this fixed production camera.
     for (const [x0, y0, x1, y1] of [[455, 422, 535, 439], [575, 439, 643, 453]]) for (let y = y0; y < y1; y++) for (let x = x0 + 1; x < x1 - 1; x++) {
-      const k = (y * image.width + x) * 4, ref = medium.data;
+      const k = ((y - image.y) * image.width + x - image.x) * 4, ref = medium.data;
       if (Math.max(ref[k], ref[k + 1], ref[k + 2]) - Math.min(ref[k], ref[k + 1], ref[k + 2]) > 16 || ref[k] < 80 || ref[k] > 190) continue;
       const delta = (i) => image.data[i] - ref[i]; sum += Math.abs(delta(k - 4) - 2 * delta(k) + delta(k + 4)); count++;
     }
