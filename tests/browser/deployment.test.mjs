@@ -3,14 +3,13 @@
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { once } from 'node:events';
-import { chromium } from '@playwright/test';
+import { createOutputDir, launchBrowser, captureFailure } from '../helpers/browser.mjs';
 import { createServer } from 'vite';
 
 const root = path.resolve('dist-web'), prefix = '/city-labs/';
-const out = process.argv[2] ?? fs.mkdtempSync(path.join(os.tmpdir(), 'city-labs-web-')); fs.mkdirSync(out, { recursive: true });
+const out = createOutputDir('deployment');
 assert(fs.existsSync(path.join(root, 'index.html')), 'run npm run build:web first');
 const mime = { '.html': 'text/html', '.js': 'application/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.png': 'image/png', '.wasm': 'application/wasm', '.vspb': 'application/octet-stream' };
 const staticServer = http.createServer((req, res) => {
@@ -24,11 +23,12 @@ const staticServer = http.createServer((req, res) => {
   catch { res.writeHead(404); res.end(); }
 });
 const sourceServer = await createServer({ configFile: false, root: process.cwd(), server: { host: '127.0.0.1', port: 0, hmr: false } });
-let browser;
+let browser, page;
 try {
   staticServer.listen(0, '127.0.0.1'); await once(staticServer, 'listening'); await sourceServer.listen();
-  browser = await chromium.launch({ headless: true, channel: 'chromium' });
-  const page = await browser.newPage({ viewport: { width: 1280, height: 900 } }), errors = [];
+  browser = await launchBrowser();
+  page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+  const errors = [];
   page.on('pageerror', (e) => errors.push(e.message));
   page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
   await page.route('**/favicon.ico', (r) => r.fulfill({ status: 204 }));
@@ -75,4 +75,4 @@ try {
   assert.deepEqual(errors, []);
   console.log('OK shared viewer: local-object city, outdoor PBR/night, terrain LOD, live renderer and no errors');
   console.log(`Artifacts: ${out}`);
-} finally { await browser?.close(); await sourceServer.close(); await new Promise((r) => staticServer.close(r)); }
+} catch (error) { await captureFailure(page, out, error); throw error; } finally { await browser?.close(); await sourceServer.close(); await new Promise((r) => staticServer.close(r)); }

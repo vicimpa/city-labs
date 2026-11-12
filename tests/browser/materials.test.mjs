@@ -2,20 +2,20 @@
 // Run: node tests/browser/materials.test.mjs [screenshot-directory]
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
-import { chromium } from '@playwright/test';
+import { createOutputDir, launchBrowser, captureFailure } from '../helpers/browser.mjs';
 import { createServer } from 'vite';
 
 const server = await createServer({ configFile: false, root: process.cwd(),
   plugins: [{ name: 'material-test-three', resolveId(id) { if (id === '/__fixtures__/material-three.js') return '\0material-test-three'; }, load(id) { if (id === '\0material-test-three') return "export * from 'three';"; } }],
   server: { host: '127.0.0.1', port: 0, hmr: false } });
-let browser;
+const out = createOutputDir('materials');
+let browser, page;
 try {
   await server.listen();
   const address = server.httpServer.address();
-  browser = await chromium.launch({ headless: true, channel: 'chromium' });
-  const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
+  browser = await launchBrowser();
+  page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
   const errors = []; page.on('pageerror', (e) => errors.push(e.message));
   const html = fs.readFileSync('editor/index.html', 'utf8').replace('<script type="module" src="./main.js"></script>', '');
   await page.route('**/editor/', (route) => route.fulfill({ contentType: 'text/html', body: html }));
@@ -86,7 +86,6 @@ try {
   const canvas = await page.locator('.material-preview canvas').elementHandle();
   await page.evaluate(() => materialTest.cleanup.refresh());
   assert.equal(await canvas.evaluate((node) => node.isConnected), true, 'refresh retains the preview renderer');
-  const out = process.argv[2] ?? os.tmpdir();
   for (const width of [1440, 960]) {
     await page.setViewportSize({ width, height: 1000 });
     await page.locator('#pane-materials').evaluate((el) => { el.scrollTop = 0; });
@@ -122,6 +121,6 @@ try {
   assert.equal(await page.locator('.material-preview canvas').count(), 0);
   assert.deepEqual(errors, []);
   console.log('OK material CRUD, preview/commit, validation, building/furniture assignment and dependency guard, undo, facade pixels/selection/default, texture reuse/disposal, shape persistence, RU/EN, 1440/960 and cleanup');
-} finally {
+} catch (error) { await captureFailure(page, out, error); throw error; } finally {
   await browser?.close(); await server.close();
 }

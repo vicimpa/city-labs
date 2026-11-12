@@ -2,20 +2,19 @@
 // project-write middleware, user browser profile or source-city mutation.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
-import { chromium } from '@playwright/test';
 import { createServer } from 'vite';
 import { decodeWorld } from '../../format/world.js';
+import { createOutputDir, launchBrowser } from '../helpers/browser.mjs';
+import { callEditorWhenIdle } from '../helpers/editor-browser.mjs';
 
-const output = process.argv[2] ?? fs.mkdtempSync(path.join(os.tmpdir(), 'city-labs-workflow-'));
-fs.mkdirSync(output, { recursive: true });
+const output = createOutputDir('workflow');
 const source = 'city/data/vespera.vspb', digest = () => createHash('sha256').update(fs.readFileSync(source)).digest('hex'), sourceBefore = digest();
 const server = await createServer({ configFile: false, root: process.cwd(), server: { host: '127.0.0.1', port: 0, hmr: false } });
-let browser;
+let browser, page;
 try {
-  await server.listen(); browser = await chromium.launch({ headless: true, channel: 'chromium' });
+  await server.listen(); browser = await launchBrowser();
   const context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, locale: 'en-US', acceptDownloads: true, storageState: { cookies: [], origins: [] } });
   const errors = [], writes = [], dialogs = [];
   await context.route('**/*', (route) => {
@@ -23,7 +22,7 @@ try {
     if (!['GET', 'HEAD'].includes(route.request().method())) { writes.push(route.request().url()); return route.abort(); }
     return route.continue();
   });
-  const page = await context.newPage(); page.on('pageerror', (e) => errors.push(e.message));
+  page = await context.newPage(); page.on('pageerror', (e) => errors.push(e.message));
   page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
   page.on('dialog', async (d) => { dialogs.push({ type: d.type(), message: d.message() }); if (d.type() === 'confirm') await d.accept(); else await d.dismiss(); });
   await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/editor/`);
@@ -34,9 +33,11 @@ try {
   await page.locator('#lang').selectOption('en');
   await page.locator('#filemenu').click(); await page.locator('#new').click();
   await page.locator('#dialog-preset').selectOption('0.5x0.5');
+  await page.locator('#dialog-res').selectOption('8');
   await page.getByRole('dialog').getByRole('button', { name: 'Create', exact: true }).click(); await ready();
-  await page.waitForFunction(() => (editor.doc.layers.terrain.nx - 1) * editor.doc.layers.terrain.res === 500);
-  assert.equal(await page.evaluate(() => (editor.doc.layers.terrain.nx - 1) * editor.doc.layers.terrain.res), 500);
+  // The requested 500 m extent rounds to 63 cells at the explicit 8 m step.
+  await page.waitForFunction(() => editor.doc.layers.terrain.res === 8);
+  assert.deepEqual(await page.evaluate(() => { const t = editor.doc.layers.terrain; return [t.nx, t.ny, t.res]; }), [64, 64, 8]);
   await page.evaluate(() => editor.setView(0, -420, 360, 0, 0, 10)); await frames();
 
   const mapClick = async (x, y, z = 10) => {
@@ -137,10 +138,7 @@ try {
   assert.equal(await page.evaluate(() => editor.sel), null, 'redo deletion clears a removed selection');
   await page.locator('#undo').click();
   assert.equal(await page.evaluate(() => editor.sel?.kind), 'building');
-  await page.evaluate(async () => {
-    const result = await editor.call('run_script', { code: "world.remove('building', world.get('building', 0));" });
-    if (result.isError) throw new Error(result.content[0].text);
-  });
+  await callEditorWhenIdle(page, 'run_script', { code: "world.remove('building', world.get('building', 0));" });
   assert.equal(await page.evaluate(() => editor.sel), null);
   await page.locator('#undo').click();
   assert.equal(await page.evaluate(() => editor.sel?.rec === editor.doc.layers.buildings.items[0]), true, 'undo agent batch restores its prior selection');
@@ -152,11 +150,8 @@ try {
   await page.getByRole('button', { name: 'Assign to selection', exact: true }).click();
   assert.equal(await page.evaluate((i) => editor.doc.layers.furniture.items[i].material, propIndex), 'harbour_brick');
 
-  await page.evaluate(async () => {
-    const r = await editor.call('update', { kind: 'building', index: 0, set: { gameplay: { district: 'harbour', collision: 'static' } } });
-    if (r.isError) throw new Error(r.content[0].text);
-    await editor.saveNow();
-  });
+  await callEditorWhenIdle(page, 'update', { kind: 'building', index: 0, set: { gameplay: { district: 'harbour', collision: 'static' } } });
+  await callEditorWhenIdle(page, 'save', {});
   const expected = await page.evaluate(() => ({ building: structuredClone(editor.doc.layers.buildings.items[0]), roads: editor.doc.layers.roads.edges.length, props: editor.doc.layers.furniture.items.length }));
   await page.reload(); await ready();
   assert.deepEqual(await page.evaluate(() => ({ building: structuredClone(editor.doc.layers.buildings.items[0]), roads: editor.doc.layers.roads.edges.length, props: editor.doc.layers.furniture.items.length })), expected, 'IndexedDB reopen restores the authored city');
@@ -185,4 +180,7 @@ try {
   assert.deepEqual(errors, [], 'no uncaught/browser WebGL errors'); assert.deepEqual(writes, [], 'no server writes');
   assert(dialogs.every((d) => d.type === 'confirm'), JSON.stringify(dialogs)); assert.equal(digest(), sourceBefore);
   console.log(`Workflow passed: roads/T junction/bridge, building, materials, prop, TRS, undo/redo, browser+file reopen, GLB, quality/day/night and RU/EN. Artifacts: ${output}`);
+} catch (error) {
+  await page?.screenshot({ path: path.join(output, 'failure.png'), timeout: 5000 }).catch(() => {});
+  throw error;
 } finally { await browser?.close(); await server.close(); assert.equal(digest(), sourceBefore, 'source city was not changed'); }

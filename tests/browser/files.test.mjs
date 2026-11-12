@@ -1,6 +1,6 @@
 // Actual editor lifecycle with a staged native-host fixture. Headless, scratch bytes only.
 import assert from 'node:assert/strict';
-import { chromium } from '@playwright/test';
+import { createOutputDir, launchBrowser, captureFailure } from '../helpers/browser.mjs';
 import { createServer } from 'vite';
 import { emptyWorld, encodeWorld } from '../../format/world.js';
 import { validateHostFile } from '../../editor/desktop.js';
@@ -18,11 +18,12 @@ await staged.commit(); await staged.commit();
 assert.equal(destination, 'B'); assert.equal(commits, 1, 'accept candidate once');
 
 const server = await createServer({ configFile: false, root: process.cwd(), server: { host: '127.0.0.1', port: 0, hmr: false } });
-let browser;
+const out = createOutputDir('files');
+let browser, page;
 try {
   await server.listen();
-  browser = await chromium.launch({ headless: true, channel: 'chromium' });
-  const page = await browser.newPage();
+  browser = await launchBrowser();
+  page = await browser.newPage();
   const errors = []; page.on('pageerror', (error) => errors.push(error.message));
   let allowConfirm = false, confirms = 0, expectedAlert = false;
   page.on('dialog', async (dialog) => {
@@ -127,4 +128,4 @@ try {
   assert.equal(await page.evaluate(() => editor.saveNow()), true, 'New-map cancel releases transition lock');
   assert.deepEqual(errors, []);
   console.log('OK native file transitions: staged acceptance, canceled Sample/Open/New, malformed Open rollback, save/open mutual exclusion, OS Open, New/Reload and MCP guards');
-} finally { await browser?.close(); await server.close(); }
+} catch (error) { await captureFailure(page, out, error); throw error; } finally { await browser?.close(); await server.close(); }

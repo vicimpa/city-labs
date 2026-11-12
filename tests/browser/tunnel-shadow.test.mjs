@@ -2,19 +2,17 @@
 // receiver acne. No benchmark, global bias changes or disabled shadows.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
 import { createHash } from 'node:crypto';
-import { chromium } from '@playwright/test';
+import { createOutputDir, launchBrowser, captureFailure } from '../helpers/browser.mjs';
 import { createServer } from 'vite';
 
-const out = process.argv[2] ?? fs.mkdtempSync(path.join(os.tmpdir(), 'city-labs-tunnel-')); fs.mkdirSync(out, { recursive: true });
+const out = createOutputDir('tunnel-shadow');
 const digest = () => createHash('sha256').update(fs.readFileSync('city/data/vespera.vspb')).digest('hex'), before = digest();
 const server = await createServer({ configFile: false, root: process.cwd(), server: { host: '127.0.0.1', port: 0, hmr: false } });
-let browser;
+let browser, page;
 try {
-  await server.listen(); browser = await chromium.launch({ headless: true, channel: 'chromium' });
-  const page = await browser.newPage({ viewport: { width: 1280, height: 900 }, deviceScaleFactor: 1 });
+  await server.listen(); browser = await launchBrowser();
+  page = await browser.newPage({ viewport: { width: 1280, height: 900 }, deviceScaleFactor: 1 });
   const errors = []; page.on('pageerror', (e) => errors.push(e.message));
   await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/editor/`);
   await page.waitForFunction(() => window.editor?.world && document.querySelector('#busy').hidden, null, { timeout: 60000 });
@@ -64,4 +62,4 @@ try {
   assert.deepEqual(errors, []);
   fs.writeFileSync(`${out}/tunnel-shadow-results.json`, JSON.stringify({ fixedNoise, inwardNoise, fixedStats, inwardStats, errors }, null, 2));
   console.log('Headless tunnel shadow passed:', JSON.stringify({ fixedNoise, inwardNoise, calls: fixedStats.calls, triangles: fixedStats.triangles }));
-} finally { await browser?.close(); await server.close(); assert.equal(digest(), before, 'source city never modified'); }
+} catch (error) { await captureFailure(page, out, error); throw error; } finally { await browser?.close(); await server.close(); assert.equal(digest(), before, 'source city never modified'); }

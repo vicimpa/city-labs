@@ -13,6 +13,9 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-24.04
+    env:
+      CITY_LABS_SOFTWARE_WEBGL: '1'
+      CITY_LABS_TEST_OUTPUT: ${{ runner.temp }}/browser-artifacts
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -27,6 +30,13 @@ jobs:
         run: npm run test:ui
       - name: Static deployment and shared viewer
         run: npm run test:web
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: browser-artifacts-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/browser-artifacts
+          retention-days: 7
+          if-no-files-found: ignore
   desktop:
     if: ${{ !inputs.skip_desktop }}
     strategy:

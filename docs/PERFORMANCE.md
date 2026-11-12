@@ -50,3 +50,8 @@ Start the two editor servers explicitly before running an A/B comparison. Both v
 expose `editor.metrics()`. Pass an output directory after `--` to keep JSON results and screenshots;
 otherwise benchmarks use the system temporary directory. URLs are required, so a benchmark cannot
 silently attach to an unrelated local server.
+
+CI browser checks use `CITY_LABS_SOFTWARE_WEBGL=1` for an explicit software renderer.
+Set the same variable to reproduce that backend locally. `CITY_LABS_TEST_OUTPUT` selects an
+artifact directory; CI retains screenshots and failure details. Mechanics tests use bounded
+maps, while the deployment and tunnel checks exercise the full bundled city.

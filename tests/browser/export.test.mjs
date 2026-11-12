@@ -1,24 +1,22 @@
 // Isolated, headless Chromium; no editor UI, native app, existing tab, or source-file writes.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
-import { chromium } from '@playwright/test';
+import { createOutputDir, launchBrowser, captureFailure } from '../helpers/browser.mjs';
 import { createServer } from 'vite';
-const out = process.argv[2] ?? fs.mkdtempSync(path.join(os.tmpdir(), 'city-export-'));
-fs.mkdirSync(out, { recursive: true });
+const out = createOutputDir('export');
 const source = 'city/data/vespera.vspb';
 const digest = () => createHash('sha256').update(fs.readFileSync(source)).digest('hex');
 const before = digest(), errors = [], materialWarnings = [];
 const server = await createServer({ configFile: false, root: process.cwd(), plugins: [{ name: 'export-fixture-imports', resolveId(id) { if (id === '/__export_modules__.js') return '\0city-export-modules'; }, load(id) { if (id === '\0city-export-modules') return `import * as THREE from 'three'; import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'; import { GLTFExporter } from 'three/examples/jsm/exporters/GLTFExporter.js'; export { THREE, GLTFLoader, GLTFExporter };`; } }], server: { host: '127.0.0.1', port: 0, hmr: false } });
-let browser;
+let browser, page;
 try {
   await server.listen();
-  browser = await chromium.launch({ headless: true, channel: 'chromium' });
+  browser = await launchBrowser();
   const context = await browser.newContext({ viewport: { width: 800, height: 600 }, storageState: { cookies: [], origins: [] } });
   await context.route('**/__export_fixture__', (route) => route.fulfill({ contentType: 'text/html', body: '<!doctype html><body></body>' }));
-  const page = await context.newPage(); page.on('pageerror', (e) => errors.push(e.message));
+  page = await context.newPage(); page.on('pageerror', (e) => errors.push(e.message));
   page.on('console', (message) => { if (/GLTFExporter: Use MeshStandardMaterial or MeshBasicMaterial/.test(message.text())) materialWarnings.push(message.text()); });
   await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/__export_fixture__`);
   const result = await page.evaluate(async () => {
@@ -144,4 +142,4 @@ try {
   fs.writeFileSync(path.join(out, 'city-map.png'), Buffer.from(result.png, 'base64'));
   fs.writeFileSync(path.join(out, 'export-results.json'), JSON.stringify(result.summary, null, 2));
   console.log('OK headless GLB/PNG/JSON export:', JSON.stringify(result.summary)); console.log('Artifacts:', out);
-} finally { await browser?.close(); await server.close(); assert.equal(digest(), before, 'source city never modified'); }
+} catch (error) { await captureFailure(page, out, error); throw error; } finally { await browser?.close(); await server.close(); assert.equal(digest(), before, 'source city never modified'); }

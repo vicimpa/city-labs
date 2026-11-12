@@ -2,17 +2,15 @@
 // opposite camera sides and live resource replacement. Not order-independent transparency.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
-import { chromium } from '@playwright/test';
+import { createOutputDir, launchBrowser, captureFailure } from '../helpers/browser.mjs';
 import { createServer } from 'vite';
 
-const out = process.argv[2] ?? fs.mkdtempSync(path.join(os.tmpdir(), 'city-labs-transparency-')); fs.mkdirSync(out, { recursive: true });
+const out = createOutputDir('transparency');
 const server = await createServer({ configFile: false, root: process.cwd(), plugins: [{ name: 'transparency-fixture-imports', resolveId(id) { if (id === '/__transparency_modules__.js') return '\0city-transparency-modules'; }, load(id) { if (id === '\0city-transparency-modules') return `export * as THREE from 'three';`; } }], server: { host: '127.0.0.1', port: 0, hmr: false } });
-let browser;
+let browser, page;
 try {
-  await server.listen(); browser = await chromium.launch({ headless: true, channel: 'chromium' });
-  const page = await browser.newPage({ viewport: { width: 1000, height: 640 }, deviceScaleFactor: 1 });
+  await server.listen(); browser = await launchBrowser();
+  page = await browser.newPage({ viewport: { width: 1000, height: 640 }, deviceScaleFactor: 1 });
   const errors = []; page.on('pageerror', (e) => errors.push(e.message));
   await page.route('**/transparency-qa', (route) => route.fulfill({ contentType: 'text/html', body: '<body style="margin:0"><div id="label" style="position:absolute;top:12px;left:12px;font:14px sans-serif;color:#17202b"></div></body>' }));
   await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/transparency-qa`);
@@ -72,4 +70,4 @@ try {
   assert.deepEqual(errors, []);
   fs.writeFileSync(`${out}/transparency-results.json`, JSON.stringify({ setup, frontOrder: front.order, backOrder: back.order, resources, errors }, null, 2));
   console.log(`Headless transparency passed: per-object reverse sort, insertion-invariant pixels, shared geometry and resource replacement. Artifacts: ${out}`);
-} finally { await browser?.close(); await server.close(); }
+} catch (error) { await captureFailure(page, out, error); throw error; } finally { await browser?.close(); await server.close(); }
