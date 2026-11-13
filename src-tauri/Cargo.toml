@@ -2,6 +2,7 @@
 name = "city-labs"
 version = "0.4.0"
 description = "City Labs city editor"
+license = "MIT"
 authors = ["vicimpa"]
 edition = "2021"
 rust-version = "1.90"
