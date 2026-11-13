@@ -595,16 +595,21 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static SCRATCH_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
     fn scratch() -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
-            "city-labs-io-{}-{}",
+            "city-labs-io-{}-{}-{}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(SystemTime::UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(),
+            SCRATCH_SEQUENCE.fetch_add(1, Ordering::Relaxed)
         ));
-        fs::create_dir_all(&dir).unwrap();
+        fs::create_dir(&dir).unwrap();
         dir
     }
     #[test]
